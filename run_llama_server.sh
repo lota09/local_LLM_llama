@@ -184,18 +184,20 @@ else
   echo "Detected GPU total VRAM: ${vram_mb} MB"
 fi
 
-# Heuristic to estimate largest possible context (-c)
-# We reserve a safety margin and estimate model/proj resident memory loosely.
-reserved_mb=1500
-# use float math via awk
-est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$reserved_mb" 'BEGIN{ if(v<=0){print 0; exit} estm=m*1.2; estp=p*1.1; a=v-estm-estp-r; if(a<0) a=0; print a }')
-# largest_ctx: scale available MB -> tokens (approx 4 tokens per MiB of KV memory)
-# No upper cap — allow arbitrarily large values when VRAM permits. Keep a conservative minimum fallback.
-largest_ctx=$(awk -v a="$est_available_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*4); if(d<1024) d=1024; print d }')
+# Optimized Heuristic based on empirical nvidia-smi data
+# 1. OS VRAM usage is ~10MB. We reserve 300MB as a safe buffer for context spikes.
+reserved_mb=300
 
-echo "Calculated largest context length (heuristic): ${largest_ctx} tokens"
+# 2. estm=m*1.02 : Actual VRAM usage (5420MB) is less than file size (6033MB). 
+# We use 1.02 (2% overhead) instead of 1.2 to reclaim ~1.8GB of VRAM.
+est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$reserved_mb" 'BEGIN{ if(v<=0){print 0; exit} estm=m*1.02; estp=p*1.05; a=v-estm-estp-r; if(a<0) a=0; print a }')
+
+# largest_ctx: scale available MB -> tokens (with Q4 KV cache = ~16 tokens/MB)
+largest_ctx=$(awk -v a="$est_available_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*16); if(d<1024) d=1024; print d }')
+
+echo "Calculated largest context length (Optimized Heuristic): ${largest_ctx} tokens"
 echo "You may enter a desired -c value. If you enter an invalid value or press Enter, the script will use -c ${largest_ctx} as fallback."
-read -p "Enter desired context tokens (-c) [recommended ${recommended_ctx}]: " user_c
+read -p "Enter desired context tokens (-c) [largest: ${largest_ctx}]: " user_c
 
 if [[ "$user_c" =~ ^[0-9]+$ ]] && [ "$user_c" -gt 0 ]; then
   c_opt="$user_c"
@@ -205,15 +207,15 @@ else
   echo "Invalid or empty input — falling back to -c $c_opt"
 fi
 
-# Start server (preserve commented options as-is)
+# Start server
 echo "Starting llama-server with model: $MODEL_PATH"
-# build args array to avoid accidental literal escapes being passed
 ARGS=( -m "$MODEL_PATH" )
 if [ -n "$PROJ_PATH" ]; then
   ARGS+=( --mmproj "$PROJ_PATH" )
 fi
-ARGS+=( --port 11436 --host 0.0.0.0 -ngl 99 -c "$c_opt" --reasoning on )
-# overthink mitigation options (kept conservative)
+
+# Flash Attention(-fa) & Q4 KV cache applies
+ARGS+=( --port 11436 --host 0.0.0.0 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4_0 --reasoning on )
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 nohup ./llama_server/llama-server "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
