@@ -14,37 +14,123 @@ sleep 1
 
 MODEL_DIR="models"
 
-echo "Searching for GGUF model files in '$MODEL_DIR'..."
-mapfile -t GGUF_FILES < <(find "$MODEL_DIR" -maxdepth 1 -type f \( -iname "*.gguf" -o -iname "*.GGUF" \) | sort)
-if [ ${#GGUF_FILES[@]} -eq 0 ]; then
-  echo "No .gguf files found in $MODEL_DIR. Place model files there and re-run."
-  exit 1
-fi
-
-echo "Select a model to run:"
-PS3="Enter number (or Ctrl+C to cancel): "
-select MODEL_PATH in "${GGUF_FILES[@]}"; do
-  if [ -n "$MODEL_PATH" ]; then
-    echo "Selected model: $MODEL_PATH"
+echo "Available model directories under '$MODEL_DIR':"
+mapfile -t DIRS < <(find "$MODEL_DIR" -maxdepth 1 -mindepth 1 -type d | sort)
+PS3="Select a directory (or enter 0 to use root models dir): "
+options=()
+for d in "${DIRS[@]}"; do
+  options+=("$d")
+done
+# Do not add $MODEL_DIR to options to avoid showing it twice; accept 0 to select root
+select CHOSEN_DIR in "${options[@]}"; do
+  if [ "$REPLY" = "0" ]; then
+    TARGET_DIR="$MODEL_DIR"
+    echo "Selected directory: $TARGET_DIR"
+    break
+  elif [ -n "$CHOSEN_DIR" ]; then
+    echo "Selected directory: $CHOSEN_DIR"
+    TARGET_DIR="$CHOSEN_DIR"
     break
   else
     echo "Invalid selection.";
   fi
 done
 
-# Vision model projection selection
-read -p "Is this a vision / multimodal model that requires a projection file? (y/N): " IS_VISION
-IS_VISION=${IS_VISION:-N}
-PROJ_PATH=""
-if [[ "$IS_VISION" =~ ^[Yy]$ ]]; then
-  echo "Searching for projection files (mmproj-*.gguf) in '$MODEL_DIR'..."
-  mapfile -t PROJ_FILES < <(find "$MODEL_DIR" -maxdepth 1 -type f -iname "*mmproj-*.gguf" | sort)
+# Auto-detect mmproj and model inside the chosen directory
+mapfile -t ALL_GGUF < <(find "$TARGET_DIR" -maxdepth 1 -type f -iname "*.gguf" | sort)
+if [ ${#ALL_GGUF[@]} -eq 0 ]; then
+  echo "No .gguf files found in $TARGET_DIR.";
+  read -p "Would you like to provide absolute paths for model and (optional) mmproj? (y/N): " provide
+  provide=${provide:-N}
+  if [[ "$provide" =~ ^[Yy]$ ]]; then
+    read -p "Enter absolute path to model GGUF: " MODEL_PATH
+    if [ ! -f "$MODEL_PATH" ]; then echo "File not found: $MODEL_PATH"; exit 1; fi
+    read -p "Enter absolute path to mmproj GGUF (or press Enter to skip): " PROJ_PATH
+    if [ -n "$PROJ_PATH" ] && [ ! -f "$PROJ_PATH" ]; then echo "Projection file not found: $PROJ_PATH"; exit 1; fi
+  else
+    echo "Place gguf files in the directory or choose another directory."; exit 1
+  fi
+else
+  mapfile -t PROJ_CANDS < <(printf '%s\n' "${ALL_GGUF[@]}" | grep -i mmproj || true)
+  # model candidates are gguf files excluding mmproj
+  model_tmp=()
+  for f in "${ALL_GGUF[@]}"; do
+    if ! printf '%s\n' "${PROJ_CANDS[@]}" | grep -qx "${f}" 2>/dev/null; then
+      model_tmp+=("$f")
+    fi
+  done
+  mapfile -t MODEL_CANDS < <(printf '%s\n' "${model_tmp[@]}" )
+
+  # choose projection if present
+  if [ ${#PROJ_CANDS[@]} -gt 0 ]; then
+    PROJ_PATH="${PROJ_CANDS[0]}"
+    echo "Auto-detected projection: $PROJ_PATH"
+  else
+    PROJ_PATH=""
+  fi
+
+  # choose model if exactly one candidate, else prompt
+  if [ ${#MODEL_CANDS[@]} -eq 1 ]; then
+    MODEL_PATH="${MODEL_CANDS[0]}"
+    echo "Auto-detected model: $MODEL_PATH"
+  elif [ ${#MODEL_CANDS[@]} -gt 1 ]; then
+    echo "Multiple model GGUF files found in $TARGET_DIR:";
+    select sel in "${MODEL_CANDS[@]}" "Enter absolute path"; do
+      if [ "$REPLY" -ge 1 ] 2>/dev/null && [ "$REPLY" -le ${#MODEL_CANDS[@]} ]; then
+        MODEL_PATH="${MODEL_CANDS[$REPLY-1]}"; echo "Selected model: $MODEL_PATH"; break
+      elif [ "$REPLY" -eq $((${#MODEL_CANDS[@]}+1)) ] 2>/dev/null; then
+        read -p "Enter absolute path to model GGUF: " MODEL_PATH
+        if [ ! -f "$MODEL_PATH" ]; then echo "File not found: $MODEL_PATH"; exit 1; fi
+        break
+      else
+        echo "Invalid selection.";
+      fi
+    done
+  else
+    # no non-mmproj gguf found
+    echo "No LLM gguf file detected in $TARGET_DIR.";
+    read -p "Would you like to provide model path manually? (y/N): " manual
+    manual=${manual:-N}
+    if [[ "$manual" =~ ^[Yy]$ ]]; then
+      read -p "Enter absolute path to model GGUF: " MODEL_PATH
+      if [ ! -f "$MODEL_PATH" ]; then echo "File not found: $MODEL_PATH"; exit 1; fi
+    else
+      echo "Aborting."; exit 1
+    fi
+  fi
+fi
+
+# Confirm auto-detected paths with user
+echo "Detected paths: model=$MODEL_PATH proj=${PROJ_PATH:-<none>}"
+read -p "Confirm and continue? (Y/n): " confirm
+confirm=${confirm:-Y}
+if [[ ! "$confirm" =~ ^[Yy]$ ]]; then
+  read -p "Enter absolute path to model GGUF: " MODEL_PATH
+  if [ ! -f "$MODEL_PATH" ]; then echo "File not found: $MODEL_PATH"; exit 1; fi
+  read -p "Enter absolute path to mmproj GGUF (or press Enter to skip): " PROJ_PATH
+  if [ -n "$PROJ_PATH" ] && [ ! -f "$PROJ_PATH" ]; then echo "Projection file not found: $PROJ_PATH"; exit 1; fi
+fi
+
+# Vision model projection selection (interactive)
+# If a projection was already auto-detected, assume it's vision and keep it
+if [ -n "${PROJ_PATH:-}" ]; then
+  echo "Auto-detected projection: $PROJ_PATH (using it)"
+  IS_VISION=Y
+else
+  read -p "Is this a vision / multimodal model that requires a projection file? (y/N): " IS_VISION
+  IS_VISION=${IS_VISION:-N}
+fi
+
+# Only search for projection files in the chosen target directory when needed
+if [[ "$IS_VISION" =~ ^[Yy]$ ]] && [ -z "${PROJ_PATH:-}" ]; then
+  echo "Searching for projection files (mmproj-*.gguf) in '$TARGET_DIR'..."
+  mapfile -t PROJ_FILES < <(find "$TARGET_DIR" -maxdepth 1 -type f -iname "*mmproj-*.gguf" | sort)
   if [ ${#PROJ_FILES[@]} -eq 0 ]; then
-    echo "No mmproj-*.gguf files found in $MODEL_DIR. You can add one or skip.";
+    echo "No mmproj-*.gguf files found in $TARGET_DIR. You can add one or skip.";
     read -p "Proceed without projection file? (y/N): " SKIP_PROJ
     SKIP_PROJ=${SKIP_PROJ:-N}
     if [[ ! "$SKIP_PROJ" =~ ^[Yy]$ ]]; then
-      echo "Aborting. Place projection files in $MODEL_DIR and re-run."; exit 1
+      echo "Aborting. Place projection files in $TARGET_DIR and re-run."; exit 1
     fi
   else
     echo "Select a vision projection file:"
@@ -64,7 +150,9 @@ if [[ "$IS_VISION" =~ ^[Yy]$ ]]; then
   fi
 fi
 
-LOG_FILE="llama_server.log"
+LOG_FILE="logs/llama_server.log"
+
+mkdir -p "$(dirname "$LOG_FILE")"
 
 # Measure file sizes (bytes)
 model_bytes=0
@@ -96,35 +184,39 @@ else
   echo "Detected GPU total VRAM: ${vram_mb} MB"
 fi
 
-# Heuristic to estimate recommended context (-c)
+# Heuristic to estimate largest possible context (-c)
 # We reserve a safety margin and estimate model/proj resident memory loosely.
 reserved_mb=1500
 # use float math via awk
 est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$reserved_mb" 'BEGIN{ if(v<=0){print 0; exit} estm=m*1.2; estp=p*1.1; a=v-estm-estp-r; if(a<0) a=0; print a }')
-recommended_ctx=$(awk -v a="$est_available_mb" 'BEGIN{ d=int(a*4); if(d<1024) d=8192; if(d>16384) d=16384; print d }')
+# largest_ctx: scale available MB -> tokens (approx 4 tokens per MiB of KV memory)
+# No upper cap — allow arbitrarily large values when VRAM permits. Keep a conservative minimum fallback.
+largest_ctx=$(awk -v a="$est_available_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*4); if(d<1024) d=1024; print d }')
 
-echo "Calculated recommended context length (heuristic): ${recommended_ctx} tokens"
-echo "You may enter a desired -c value. If you enter an invalid value or press Enter, the script will use -c ${recommended_ctx} as fallback."
+echo "Calculated largest context length (heuristic): ${largest_ctx} tokens"
+echo "You may enter a desired -c value. If you enter an invalid value or press Enter, the script will use -c ${largest_ctx} as fallback."
 read -p "Enter desired context tokens (-c) [recommended ${recommended_ctx}]: " user_c
 
 if [[ "$user_c" =~ ^[0-9]+$ ]] && [ "$user_c" -gt 0 ]; then
   c_opt="$user_c"
   echo "Using user-specified -c $c_opt"
 else
-  c_opt=${recommended_ctx}
+  c_opt=${largest_ctx}
   echo "Invalid or empty input — falling back to -c $c_opt"
 fi
 
 # Start server (preserve commented options as-is)
 echo "Starting llama-server with model: $MODEL_PATH"
-nohup ./llama_server/llama-server \
-  -m "$MODEL_PATH" \
-  --port 11436 \
-  --host 0.0.0.0 \
-  -ngl 99 \
-  -c $c_opt \
-  --reasoning on \
-  > "$LOG_FILE" 2>&1 &
+# build args array to avoid accidental literal escapes being passed
+ARGS=( -m "$MODEL_PATH" )
+if [ -n "$PROJ_PATH" ]; then
+  ARGS+=( --mmproj "$PROJ_PATH" )
+fi
+ARGS+=( --port 11436 --host 0.0.0.0 -ngl 99 -c "$c_opt" --reasoning on )
+# overthink mitigation options (kept conservative)
+ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
+
+nohup ./llama_server/llama-server "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
 
 echo "Llama-server started on port 11436"
 echo "Log file: $LOG_FILE"
