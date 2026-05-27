@@ -4,17 +4,52 @@ set -euo pipefail
 print() { printf '%s\n' "$*"; }
 
 download() {
-  local url="$1" dest="$2"
-  if command -v curl >/dev/null 2>&1; then
-    curl -L --fail --progress-bar -o "$dest" "$url"
-    return $?
-  elif command -v wget >/dev/null 2>&1; then
-    wget -q --show-progress -O "$dest" "$url"
-    return $?
-  else
-    print "Error: curl or wget is required to download files." >&2
-    return 2
-  fi
+  local url="$1" dest="$2" max_retries=3 attempt=1
+
+  print "Downloading: $url"
+  print "Destination: $dest"
+
+  while [ $attempt -le $max_retries ]; do
+    if command -v curl >/dev/null 2>&1; then
+      # curl with resume capability (-C -)
+      if [ -f "$dest" ]; then
+        print "Resume 모드로 다운로드 재개 중... (시도 $attempt/$max_retries)"
+        curl -L --fail --progress-bar -C - -o "$dest" "$url"
+      else
+        curl -L --fail --progress-bar -o "$dest" "$url"
+      fi
+      if [ $? -eq 0 ]; then
+        print "✓ 다운로드 완료"
+        return 0
+      fi
+    elif command -v wget >/dev/null 2>&1; then
+      # wget with resume capability (-c)
+      if [ -f "$dest" ]; then
+        print "Resume 모드로 다운로드 재개 중... (시도 $attempt/$max_retries)"
+        wget -q --show-progress -c -O "$dest" "$url"
+      else
+        wget -q --show-progress -O "$dest" "$url"
+      fi
+      if [ $? -eq 0 ]; then
+        print "✓ 다운로드 완료"
+        return 0
+      fi
+    else
+      print "Error: curl or wget is required to download files." >&2
+      return 2
+    fi
+
+    if [ $attempt -lt $max_retries ]; then
+      wait_time=$((attempt * 10))
+      print "⚠ 다운로드 실패. ${wait_time}초 후 재시도..."
+      sleep "$wait_time"
+    fi
+    ((attempt++))
+  done
+
+  print "Error: 다운로드 최대 시도 횟수 초과" >&2
+  [ -f "$dest" ] && rm -f "$dest"
+  return 1
 }
 
 read -p "Model directory name (will create models/<name>/): " MODEL_DIR_NAME

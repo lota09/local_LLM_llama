@@ -6,6 +6,7 @@ Usage: run and follow prompts. Saves model as <name>.gguf and projection as
 """
 import os
 import sys
+import time
 import urllib.request
 import urllib.parse
 import re
@@ -18,33 +19,68 @@ def prompt(msg):
         return ""
 
 
-def download(url, dest):
+def download(url, dest, max_retries=3):
     print(f"Downloading:\n  {url}\n-> {dest}")
-    try:
-        req = urllib.request.Request(url, headers={"User-Agent": "wget/1.21"})
-        with urllib.request.urlopen(req) as r:
-            total = r.getheader("Content-Length")
-            total = int(total) if total and total.isdigit() else None
-            with open(dest, "wb") as f:
-                downloaded = 0
-                chunk_size = 64 * 1024
-                while True:
-                    chunk = r.read(chunk_size)
-                    if not chunk:
-                        break
-                    f.write(chunk)
-                    downloaded += len(chunk)
+
+    for attempt in range(1, max_retries + 1):
+        try:
+            # Check if file exists and get its size for resume
+            resume_header = {}
+            if os.path.exists(dest):
+                file_size = os.path.getsize(dest)
+                if file_size > 0:
+                    print(f"  Resume 모드로 재개 중... (시도 {attempt}/{max_retries})")
+                    resume_header = {"Range": f"bytes={file_size}-"}
+
+            req = urllib.request.Request(
+                url,
+                headers={
+                    "User-Agent": "wget/1.21",
+                    **resume_header
+                }
+            )
+            with urllib.request.urlopen(req) as r:
+                total = r.getheader("Content-Length")
+                total = int(total) if total and total.isdigit() else None
+
+                # Resume mode: add existing file size
+                if resume_header and os.path.exists(dest):
+                    existing_size = os.path.getsize(dest)
                     if total:
-                        pct = downloaded * 100 / total
-                        print(f"  {downloaded}/{total} bytes ({pct:.1f}%)", end="\r")
-        if total:
-            print()
-        print("Download finished.")
-    except Exception as e:
-        print(f"Download failed: {e}")
-        if os.path.exists(dest):
-            os.remove(dest)
-        sys.exit(1)
+                        total += existing_size
+                    mode = "ab"  # append binary
+                else:
+                    mode = "wb"  # write binary
+
+                with open(dest, mode) as f:
+                    downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
+                    chunk_size = 64 * 1024
+                    while True:
+                        chunk = r.read(chunk_size)
+                        if not chunk:
+                            break
+                        f.write(chunk)
+                        downloaded += len(chunk)
+                        if total:
+                            pct = downloaded * 100 / total
+                            print(f"  {downloaded}/{total} bytes ({pct:.1f}%)", end="\r")
+            if total:
+                print()
+            print("✓ 다운로드 완료")
+            return
+        except Exception as e:
+            print(f"\n⚠ 다운로드 실패: {e}")
+            if attempt < max_retries:
+                wait_time = attempt * 10
+                print(f"  {wait_time}초 후 재시도...")
+                import time
+                time.sleep(wait_time)
+            else:
+                print("✗ 최대 시도 횟수 초과")
+                if os.path.exists(dest):
+                    os.remove(dest)
+                sys.exit(1)
+            break
 
 
 def safe_filename_from_proj_url(basename, name):
