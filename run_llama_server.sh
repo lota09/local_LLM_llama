@@ -219,7 +219,24 @@ ARGS+=( --port 11436 --host 0.0.0.0 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 nohup ./llama_server/llama-server "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
+SERVER_PID=$!
 
-echo "Llama-server started on port 11436"
-echo "Log file: $LOG_FILE"
-echo "Check progress: tail -f $LOG_FILE"
+echo "Llama-server started (PID $SERVER_PID) on port 11436"
+echo ""
+
+# 서버가 준비되거나 실패할 때까지 로그 스트리밍
+# --pid: 서버 프로세스가 죽으면 tail도 자동 종료
+tail -f "$LOG_FILE" --pid="$SERVER_PID" | while IFS= read -r line; do
+  echo "$line"
+  if echo "$line" | grep -q "all slots are idle"; then
+    echo ""
+    echo "Server ready at http://0.0.0.0:11436"
+    break
+  elif echo "$line" | grep -qE "symbol lookup error|GGML_ABORT|Killed|[Ss]egmentation fault|core dumped"; then
+    echo ""
+    echo "Server failed to start. See: $LOG_FILE"
+    break
+  fi
+done
+
+pkill -f "tail -f $LOG_FILE" 2>/dev/null || true

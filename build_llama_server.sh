@@ -125,7 +125,8 @@ CMAKE_DIR=$(dirname "$CMAKE_REALPATH")
 CONDA_ENV_LIB="${CMAKE_DIR%/bin}/lib"
 if [ -d "$CONDA_ENV_LIB" ]; then
   export LD_LIBRARY_PATH="$CONDA_ENV_LIB:${LD_LIBRARY_PATH:-}"
-  echo "LD_LIBRARY_PATH 앞에 추가: $CONDA_ENV_LIB"
+  export LIBRARY_PATH="$CONDA_ENV_LIB:${LIBRARY_PATH:-}"
+  echo "LD_LIBRARY_PATH/LIBRARY_PATH 앞에 추가: $CONDA_ENV_LIB"
 fi
 
 # ─────────────────────────────────────────────
@@ -225,8 +226,9 @@ if [ "$USE_CUDA" -eq 1 ] && command -v gcc >/dev/null 2>&1; then
     echo "Host GCC version $GCC_VER > 13: adding --allow-unsupported-compiler for nvcc"
     # Create an nvcc wrapper that injects --allow-unsupported-compiler so that
     # CMake's CUDA compiler detection compiles test sources successfully.
-    WRAPPER_DIR="$BUILD_DIR/nvcc-wrapper"
+    WRAPPER_DIR="/tmp/nvcc-wrapper-$$"
     mkdir -p "$WRAPPER_DIR"
+    trap 'rm -rf "$WRAPPER_DIR"' EXIT
     REAL_NVCC="$NVCC_BIN"
     if [ -z "$REAL_NVCC" ]; then
       REAL_NVCC=$(command -v nvcc 2>/dev/null || true)
@@ -385,12 +387,18 @@ cp "$FOUND_BIN" "$TARGET_BIN"
 chmod +x "$TARGET_BIN"
 echo "설치 완료: $TARGET_BIN"
 
+# 구버전 공유 라이브러리 제거 (심볼릭 링크 불일치 방지)
+find "$INSTALL_DIR" -maxdepth 1 \( \
+    -name 'libllama*.so*' -o -name 'libggml*.so*' \
+    -o -name 'libllama*.dylib' -o -name 'libggml*.dylib' \
+  \) -delete 2>/dev/null || true
+
 # ─────────────────────────────────────────────
 # 9. 공유 라이브러리 복사
 # ─────────────────────────────────────────────
 section "9. 공유 라이브러리 복사"
 
-find "$BUILD_DIR/build" -maxdepth 4 -type f \( \
+find "$BUILD_DIR/build" -maxdepth 4 \( -type f -o -type l \) \( \
     -name 'libllama*.so*' \
     -o -name 'libggml*.so*' \
     -o -name 'libllama*.dylib' \
