@@ -90,8 +90,30 @@ if [ -z "$CMAKE_BIN" ]; then
   fi
 fi
 
+# 마지막 수단: apt 자동 설치 (Linux)
 if [ -z "$CMAKE_BIN" ]; then
-  echo "Error: cmake를 설치하거나 찾을 수 없습니다. 수동으로 설치 후 재실행하세요." >&2
+  if command -v apt-get >/dev/null 2>&1; then
+    echo "apt-get로 cmake 설치 중..."
+    sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y cmake 2>&1 | grep -E "^(Setting|Processing|Reading|Building|Get|Unpacking|Setting)" || true
+    if command -v cmake >/dev/null 2>&1; then
+      CMAKE_BIN="cmake"
+      echo "cmake 설치 성공: $(cmake --version | head -n1)"
+    fi
+  elif command -v yum >/dev/null 2>&1; then
+    echo "yum으로 cmake 설치 중..."
+    sudo yum install -y cmake 2>&1 | tail -5
+    if command -v cmake >/dev/null 2>&1; then
+      CMAKE_BIN="cmake"
+      echo "cmake 설치 성공: $(cmake --version | head -n1)"
+    fi
+  fi
+fi
+
+if [ -z "$CMAKE_BIN" ]; then
+  echo "Error: cmake를 자동 설치할 수 없습니다. 다음 중 하나를 수행하세요:" >&2
+  echo "  1. sudo apt-get install cmake  (Debian/Ubuntu)" >&2
+  echo "  2. conda install -c conda-forge cmake" >&2
+  echo "  3. brew install cmake  (macOS)" >&2
   exit 1
 fi
 
@@ -103,7 +125,8 @@ CMAKE_DIR=$(dirname "$CMAKE_REALPATH")
 CONDA_ENV_LIB="${CMAKE_DIR%/bin}/lib"
 if [ -d "$CONDA_ENV_LIB" ]; then
   export LD_LIBRARY_PATH="$CONDA_ENV_LIB:${LD_LIBRARY_PATH:-}"
-  echo "LD_LIBRARY_PATH 앞에 추가: $CONDA_ENV_LIB"
+  export LIBRARY_PATH="$CONDA_ENV_LIB:${LIBRARY_PATH:-}"
+  echo "LD_LIBRARY_PATH/LIBRARY_PATH 앞에 추가: $CONDA_ENV_LIB"
 fi
 
 # ─────────────────────────────────────────────
@@ -178,6 +201,21 @@ fi
 
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 echo "병렬 빌드 잡: $JOBS"
+
+# C++ 표준 라이브러리 링킹 문제 해결
+# libstdc++ 버전 불일치로 인한 undefined reference 오류 방지
+if [ "$USE_CUDA" -eq 1 ]; then
+  # CUDA 빌드: 더 보수적인 설정
+  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_STANDARD=17"
+  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_FLAGS=-fPIC"
+  # CUDA와 호스트 컴파일러 간 ABI 호환성
+  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DGLIBCXX_USE_CXX11_ABI=1"
+else
+  # CPU-only: 더 최신의 표준 사용 가능
+  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_STANDARD=17"
+  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_FLAGS=-fPIC\ -Wl,--as-needed"
+fi
+
 echo "cmake 추가 플래그:$CMAKE_EXTRA_FLAGS"
 
 # Detect host GCC version and add nvcc override if needed
@@ -188,8 +226,9 @@ if [ "$USE_CUDA" -eq 1 ] && command -v gcc >/dev/null 2>&1; then
     echo "Host GCC version $GCC_VER > 13: adding --allow-unsupported-compiler for nvcc"
     # Create an nvcc wrapper that injects --allow-unsupported-compiler so that
     # CMake's CUDA compiler detection compiles test sources successfully.
-    WRAPPER_DIR="$BUILD_DIR/nvcc-wrapper"
+    WRAPPER_DIR="/tmp/nvcc-wrapper-$$"
     mkdir -p "$WRAPPER_DIR"
+    trap 'rm -rf "$WRAPPER_DIR"' EXIT
     REAL_NVCC="$NVCC_BIN"
     if [ -z "$REAL_NVCC" ]; then
       REAL_NVCC=$(command -v nvcc 2>/dev/null || true)
@@ -279,7 +318,30 @@ echo "Configuring..."
 
 echo ""
 echo "Building..."
-"$CMAKE_BIN" --build build --config Release -j"$JOBS"
+if ! "$CMAKE_BIN" --build build --config Release -j"$JOBS" 2>&1 | tee "$BUILD_DIR/build.log"; then
+  echo ""
+  echo "ERROR: 빌드 실패" >&2
+  echo ""
+  echo "📋 일반적인 해결 방법:"
+  echo ""
+  echo "1. C++ 표준 라이브러리 링킹 오류 (std::__throw_bad_array_new_length):"
+  echo "   - 원인: libstdc++ 버전 불일치"
+  echo "   - 해결: conda 환경에서 컴파일러 재설치"
+  echo "   $ conda install -y -c conda-forge gxx=13 libstdcxx"
+  echo ""
+  echo "2. CUDA 컴파일 오류:"
+  echo "   - 원인: CUDA 버전 vs GCC 호환성 문제"
+  echo "   - 해결: CPU-only 빌드 재시도"
+  echo "   $ BUILD_DIR=/tmp/llama_build_cpu bash build_llama_server.sh"
+  echo ""
+  echo "3. CMake 구성 오류:"
+  echo "   - 빌드 디렉터리 초기화 후 재시도"
+  echo "   $ rm -rf /tmp/llama_build && bash build_llama_server.sh"
+  echo ""
+  echo "빌드 로그: $BUILD_DIR/build.log"
+  echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+  exit 1
+fi
 
 popd >/dev/null
 
@@ -325,12 +387,18 @@ cp "$FOUND_BIN" "$TARGET_BIN"
 chmod +x "$TARGET_BIN"
 echo "설치 완료: $TARGET_BIN"
 
+# 구버전 공유 라이브러리 제거 (심볼릭 링크 불일치 방지)
+find "$INSTALL_DIR" -maxdepth 1 \( \
+    -name 'libllama*.so*' -o -name 'libggml*.so*' \
+    -o -name 'libllama*.dylib' -o -name 'libggml*.dylib' \
+  \) -delete 2>/dev/null || true
+
 # ─────────────────────────────────────────────
 # 9. 공유 라이브러리 복사
 # ─────────────────────────────────────────────
 section "9. 공유 라이브러리 복사"
 
-find "$BUILD_DIR/build" -maxdepth 4 -type f \( \
+find "$BUILD_DIR/build" -maxdepth 4 \( -type f -o -type l \) \( \
     -name 'libllama*.so*' \
     -o -name 'libggml*.so*' \
     -o -name 'libllama*.dylib' \
