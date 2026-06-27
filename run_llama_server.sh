@@ -4,6 +4,26 @@
 # 스크립트 위치로 이동
 cd "$(dirname "$0")"
 
+# ─── 포트 인자 파싱 ───────────────────────────────────────────────────────────
+# 사용법: ./run_llama_server.sh [--port PORT]
+# 기본값: 8080  (외부 접근은 setup_secure_server.sh 의 Caddy HTTPS 를 사용)
+SERVER_PORT=8080
+_argv=("$@")
+_i=0
+while [[ $_i -lt ${#_argv[@]} ]]; do
+  case "${_argv[$_i]}" in
+    --port)
+      _i=$(( _i + 1 ))
+      SERVER_PORT="${_argv[$_i]}"
+      ;;
+    --port=*)
+      SERVER_PORT="${_argv[$_i]#*=}"
+      ;;
+  esac
+  _i=$(( _i + 1 ))
+done
+echo "llama-server 포트: ${SERVER_PORT}  (변경: ./run_llama_server.sh --port 1234)"
+
 # 라이브러리 경로 설정
 export LD_LIBRARY_PATH=/users/lota7574/miniconda3/envs/llama_env/lib:./llama_server:$LD_LIBRARY_PATH
 export CUDA_VISIBLE_DEVICES=0
@@ -215,13 +235,14 @@ if [ -n "$PROJ_PATH" ]; then
 fi
 
 # Flash Attention(-fa) & Q4 KV cache applies
-ARGS+=( --port 11436 --host 0.0.0.0 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4_0 --reasoning on )
+# --host 127.0.0.1: 로컬 전용 (외부 HTTP 차단 — 외부 접근은 Caddy HTTPS 사용)
+ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4_0 --reasoning on )
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 nohup ./llama_server/llama-server "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 
-echo "Llama-server started (PID $SERVER_PID) on port 11436"
+echo "Llama-server started (PID $SERVER_PID) on port ${SERVER_PORT}"
 echo ""
 
 # 서버가 준비되거나 실패할 때까지 로그 스트리밍
@@ -230,7 +251,7 @@ tail -f "$LOG_FILE" --pid="$SERVER_PID" | while IFS= read -r line; do
   echo "$line"
   if echo "$line" | grep -q "all slots are idle"; then
     echo ""
-    echo "Server ready at http://0.0.0.0:11436"
+    echo "Server ready at http://127.0.0.1:${SERVER_PORT}"
     break
   elif echo "$line" | grep -qE "symbol lookup error|GGML_ABORT|Killed|[Ss]egmentation fault|core dumped"; then
     echo ""
