@@ -3,6 +3,11 @@ set -euo pipefail
 # Build and install script for `llama_server/llama-server`
 # Uses cmake (current llama.cpp build system).
 # Fully automatic: resolves cmake/nvcc from conda or system paths.
+#
+# 설계 목표: 어떤 시스템에서든 최적 빌드
+#   - CPU 아키텍처 무관 (x86_64 / ARM64 등)
+#   - 가속 백엔드 자동 감지: CUDA(NVIDIA) / ROCm(AMD) / Metal(macOS) / CPU-only
+#   - 빌드 플래그를 "문자열"이 아닌 "배열"로 누적하여 공백/이식성 문제 원천 차단
 
 REPO_URL=${REPO_URL:-https://github.com/ggerganov/llama.cpp.git}
 BUILD_DIR=${BUILD_DIR:-/tmp/llama_build}
@@ -13,6 +18,11 @@ BACKUP_DIR=${BACKUP_DIR:-$(pwd)/llama_server_backup_$(date +%s)}
 # 유틸: 섹션 헤더 출력
 # ─────────────────────────────────────────────
 section() { echo ""; echo "── $* ──"; }
+
+# 플랫폼 식별 (여러 곳에서 재사용)
+OS_NAME="$(uname -s)"          # Linux / Darwin
+ARCH_NAME="$(uname -m)"        # x86_64 / aarch64 / arm64 ...
+echo "Platform: OS=$OS_NAME ARCH=$ARCH_NAME"
 
 # ─────────────────────────────────────────────
 # 1. 최신 릴리즈 태그 자동 감지
@@ -49,7 +59,9 @@ CONDA_ROOTS=()
 [ -d "$HOME/anaconda3" ]         && CONDA_ROOTS+=("$HOME/anaconda3")
 [ -d "/opt/conda" ]              && CONDA_ROOTS+=("/opt/conda")
 
-for root in "${CONDA_ROOTS[@]}"; do
+# CONDA_ROOTS가 비어 있어도 'set -u'에서 안전하게 순회
+for root in "${CONDA_ROOTS[@]:-}"; do
+  [ -n "$root" ] || continue
   for subdir in "" "/envs/llama_env" "/envs/base"; do
     candidate="$root$subdir/bin/cmake"
     if [ -x "$candidate" ]; then
@@ -72,13 +84,15 @@ fi
 if [ -z "$CMAKE_BIN" ]; then
   echo "cmake를 찾을 수 없습니다. conda로 설치 시도..."
   CONDA_CMD=""
-  for root in "${CONDA_ROOTS[@]}"; do
+  for root in "${CONDA_ROOTS[@]:-}"; do
+    [ -n "$root" ] || continue
     [ -x "$root/bin/conda" ] && CONDA_CMD="$root/bin/conda" && break
   done
   if [ -n "$CONDA_CMD" ]; then
     "$CONDA_CMD" install -y -c conda-forge cmake 2>&1 | tail -5
     # 재탐색
-    for root in "${CONDA_ROOTS[@]}"; do
+    for root in "${CONDA_ROOTS[@]:-}"; do
+      [ -n "$root" ] || continue
       for subdir in "" "/envs/llama_env"; do
         candidate="$root$subdir/bin/cmake"
         if [ -x "$candidate" ]; then
@@ -90,23 +104,30 @@ if [ -z "$CMAKE_BIN" ]; then
   fi
 fi
 
-# 마지막 수단: apt 자동 설치 (Linux)
+# 마지막 수단: OS별 패키지 매니저 자동 설치
 if [ -z "$CMAKE_BIN" ]; then
   if command -v apt-get >/dev/null 2>&1; then
     echo "apt-get로 cmake 설치 중..."
-    sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y cmake 2>&1 | grep -E "^(Setting|Processing|Reading|Building|Get|Unpacking|Setting)" || true
-    if command -v cmake >/dev/null 2>&1; then
-      CMAKE_BIN="cmake"
-      echo "cmake 설치 성공: $(cmake --version | head -n1)"
-    fi
+    sudo apt-get update >/dev/null 2>&1 && sudo apt-get install -y cmake 2>&1 | grep -E "^(Setting|Processing|Reading|Building|Get|Unpacking)" || true
+    command -v cmake >/dev/null 2>&1 && CMAKE_BIN="cmake"
+  elif command -v dnf >/dev/null 2>&1; then
+    echo "dnf로 cmake 설치 중..."
+    sudo dnf install -y cmake 2>&1 | tail -5
+    command -v cmake >/dev/null 2>&1 && CMAKE_BIN="cmake"
   elif command -v yum >/dev/null 2>&1; then
     echo "yum으로 cmake 설치 중..."
     sudo yum install -y cmake 2>&1 | tail -5
-    if command -v cmake >/dev/null 2>&1; then
-      CMAKE_BIN="cmake"
-      echo "cmake 설치 성공: $(cmake --version | head -n1)"
-    fi
+    command -v cmake >/dev/null 2>&1 && CMAKE_BIN="cmake"
+  elif command -v brew >/dev/null 2>&1; then
+    echo "brew로 cmake 설치 중..."
+    brew install cmake 2>&1 | tail -5
+    command -v cmake >/dev/null 2>&1 && CMAKE_BIN="cmake"
+  elif command -v pacman >/dev/null 2>&1; then
+    echo "pacman으로 cmake 설치 중..."
+    sudo pacman -S --noconfirm cmake 2>&1 | tail -5
+    command -v cmake >/dev/null 2>&1 && CMAKE_BIN="cmake"
   fi
+  [ -n "$CMAKE_BIN" ] && echo "cmake 설치 성공: $(cmake --version | head -n1)"
 fi
 
 if [ -z "$CMAKE_BIN" ]; then
@@ -130,161 +151,184 @@ if [ -d "$CONDA_ENV_LIB" ]; then
 fi
 
 # ─────────────────────────────────────────────
-# 3. nvcc (CUDA 컴파일러) 자동 탐색
+# 3. 가속 백엔드 자동 탐색 (CUDA → ROCm → Metal → CPU)
 # ─────────────────────────────────────────────
-section "3. CUDA / nvcc 탐색"
+section "3. 가속 백엔드 탐색"
+
+# 빌드 플래그를 배열로 누적 (공백/이식성 안전)
+CMAKE_ARGS=()
 
 NVCC_BIN=""
 USE_CUDA=0
+USE_ROCM=0
+USE_METAL=0
 
-# 일반적인 CUDA Toolkit 설치 경로들
-CUDA_CANDIDATES=(
-  "/usr/local/cuda/bin/nvcc"
-  "/usr/local/cuda-12/bin/nvcc"
-  "/usr/local/cuda-12.6/bin/nvcc"
-  "/usr/local/cuda-12.4/bin/nvcc"
-  "/usr/local/cuda-11/bin/nvcc"
-  "/usr/cuda/bin/nvcc"
-)
-# PATH에 있는 nvcc도 후보에 추가
-command -v nvcc >/dev/null 2>&1 && CUDA_CANDIDATES+=("$(command -v nvcc)")
-
-for c in "${CUDA_CANDIDATES[@]}"; do
-  if [ -x "$c" ]; then
-    NVCC_BIN="$c"
-    break
-  fi
-done
-
-# nvcc 못 찾았지만 nvidia-smi는 있는 경우 → 더 넓게 탐색
-if [ -z "$NVCC_BIN" ] && command -v nvidia-smi >/dev/null 2>&1; then
-  NVCC_BIN=$(find /usr/local -name nvcc -type f 2>/dev/null | head -n1 || true)
+# --- 3a. macOS면 Metal 우선 (Apple Silicon/Intel 공통) ---
+if [ "$OS_NAME" = "Darwin" ]; then
+  USE_METAL=1
+  echo "macOS 감지 → Metal 백엔드 사용 (-DGGML_METAL=ON)"
 fi
 
-if [ -n "$NVCC_BIN" ]; then
-  USE_CUDA=1
-  CUDA_BIN_DIR=$(dirname "$NVCC_BIN")
-  export PATH="$CUDA_BIN_DIR:$PATH"
-  export CUDACXX="$NVCC_BIN"
-  echo "nvcc 발견: $NVCC_BIN"
-  echo "CUDACXX=$CUDACXX"
-else
-  echo "nvcc를 찾을 수 없습니다 → CPU-only 빌드로 진행"
+# --- 3b. NVIDIA CUDA 탐색 (Linux) ---
+if [ "$USE_METAL" -eq 0 ]; then
+  CUDA_CANDIDATES=(
+    "/usr/local/cuda/bin/nvcc"
+    "/usr/local/cuda-12/bin/nvcc"
+    "/usr/local/cuda-12.6/bin/nvcc"
+    "/usr/local/cuda-12.4/bin/nvcc"
+    "/usr/local/cuda-11/bin/nvcc"
+    "/usr/cuda/bin/nvcc"
+  )
+  command -v nvcc >/dev/null 2>&1 && CUDA_CANDIDATES+=("$(command -v nvcc)")
+
+  for c in "${CUDA_CANDIDATES[@]}"; do
+    if [ -x "$c" ]; then
+      NVCC_BIN="$c"
+      break
+    fi
+  done
+  # nvcc는 없지만 nvidia-smi가 있으면 더 넓게 탐색
+  if [ -z "$NVCC_BIN" ] && command -v nvidia-smi >/dev/null 2>&1; then
+    NVCC_BIN=$(find /usr/local -name nvcc -type f 2>/dev/null | head -n1 || true)
+  fi
+
+  if [ -n "$NVCC_BIN" ]; then
+    USE_CUDA=1
+    CUDA_BIN_DIR=$(dirname "$NVCC_BIN")
+    export PATH="$CUDA_BIN_DIR:$PATH"
+    export CUDACXX="$NVCC_BIN"
+    echo "nvcc 발견: $NVCC_BIN → CUDA 백엔드 사용"
+  fi
+fi
+
+# --- 3c. CUDA가 없으면 AMD ROCm/HIP 탐색 (Linux) ---
+if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ]; then
+  HIPCC_BIN=""
+  for c in /opt/rocm/bin/hipcc "$(command -v hipcc 2>/dev/null || true)"; do
+    [ -n "$c" ] && [ -x "$c" ] && HIPCC_BIN="$c" && break
+  done
+  if [ -n "$HIPCC_BIN" ]; then
+    USE_ROCM=1
+    echo "hipcc 발견: $HIPCC_BIN → ROCm(HIP) 백엔드 사용"
+  fi
+fi
+
+if [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ] && [ "$USE_METAL" -eq 0 ]; then
+  echo "가속기를 찾지 못함 → CPU-only 빌드로 진행"
 fi
 
 # ─────────────────────────────────────────────
-# 4. cmake 플래그 결정
+# 4. cmake 플래그 결정 (배열에 누적)
 # ─────────────────────────────────────────────
 section "4. 빌드 플래그 결정"
 
-CMAKE_EXTRA_FLAGS=""
+# 공통: 항상 Release + 서버 빌드 + C++17
+CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE=Release)
+CMAKE_ARGS+=(-DLLAMA_BUILD_SERVER=ON)
+CMAKE_ARGS+=(-DCMAKE_CXX_STANDARD=17)
 
+# 백엔드별 플래그
 if [ "$USE_CUDA" -eq 1 ]; then
   echo "CUDA 빌드 활성화: -DGGML_CUDA=ON"
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DGGML_CUDA=ON"
+  CMAKE_ARGS+=(-DGGML_CUDA=ON)
+  [ -n "$NVCC_BIN" ] && CMAKE_ARGS+=(-DCMAKE_CUDA_COMPILER="$NVCC_BIN")
+elif [ "$USE_ROCM" -eq 1 ]; then
+  echo "ROCm(HIP) 빌드 활성화: -DGGML_HIP=ON"
+  CMAKE_ARGS+=(-DGGML_HIP=ON)
+elif [ "$USE_METAL" -eq 1 ]; then
+  echo "Metal 빌드 활성화: -DGGML_METAL=ON"
+  CMAKE_ARGS+=(-DGGML_METAL=ON)
 else
   echo "CPU-only 빌드"
 fi
 
-if [[ "$(uname)" == "Darwin" ]]; then
-  echo "macOS 감지 → -DGGML_METAL=ON"
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DGGML_METAL=ON"
-fi
-
-if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
-  echo "AVX-512 감지 → -DGGML_AVX512=ON"
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DGGML_AVX512=ON"
-elif grep -q avx2 /proc/cpuinfo 2>/dev/null; then
-  echo "AVX2 감지 → -DGGML_AVX2=ON"
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DGGML_AVX2=ON"
-fi
+# CPU SIMD 자동 감지 — x86 계열에서만 AVX 플래그가 의미 있음.
+# ARM(aarch64/arm64)에서는 NEON이 기본이라 별도 플래그 불필요 (잘못된 AVX 플래그 주입 방지).
+case "$ARCH_NAME" in
+  x86_64|amd64|i?86)
+    if grep -q avx512f /proc/cpuinfo 2>/dev/null; then
+      echo "AVX-512 감지 → -DGGML_AVX512=ON"
+      CMAKE_ARGS+=(-DGGML_AVX512=ON)
+    elif grep -q avx2 /proc/cpuinfo 2>/dev/null; then
+      echo "AVX2 감지 → -DGGML_AVX2=ON"
+      CMAKE_ARGS+=(-DGGML_AVX2=ON)
+    else
+      echo "AVX2/512 미감지 → 기본 SIMD로 빌드"
+    fi
+    ;;
+  aarch64|arm64)
+    echo "ARM64 감지 → NEON 기본 사용 (AVX 플래그 생략)"
+    ;;
+  *)
+    echo "알 수 없는 아키텍처($ARCH_NAME) → SIMD 플래그 cmake 자동 결정에 위임"
+    ;;
+esac
 
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 echo "병렬 빌드 잡: $JOBS"
 
-# C++ 표준 라이브러리 링킹 문제 해결
-# libstdc++ 버전 불일치로 인한 undefined reference 오류 방지
-if [ "$USE_CUDA" -eq 1 ]; then
-  # CUDA 빌드: 더 보수적인 설정
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_STANDARD=17"
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_FLAGS=-fPIC"
-  # CUDA와 호스트 컴파일러 간 ABI 호환성
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DGLIBCXX_USE_CXX11_ABI=1"
-else
-  # CPU-only: 더 최신의 표준 사용 가능
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_STANDARD=17"
-  CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CXX_FLAGS=-fPIC\ -Wl,--as-needed"
+# 링커 최적화 플래그(--as-needed)는 GNU ld에서만 유효.
+# macOS(Mach-O ld)/lld 등에서는 인식 못 하므로 GNU ld일 때만, 그리고
+# (컴파일이 아닌) "링커" 플래그 변수에 넣는다. CXX_FLAGS에 넣던 기존 버그를 교정.
+if [ "$OS_NAME" = "Linux" ] && ld --version 2>/dev/null | grep -qi "GNU ld"; then
+  echo "GNU ld 감지 → -Wl,--as-needed 링커 플래그 추가"
+  CMAKE_ARGS+=(-DCMAKE_EXE_LINKER_FLAGS=-Wl,--as-needed)
+  CMAKE_ARGS+=(-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--as-needed)
 fi
+# 주: -fPIC는 llama.cpp가 공유 라이브러리 빌드 시 cmake가 자동 부여하므로
+#     직접 지정하지 않는다(이식성 + 중복 방지). 기존의 깨진 '-fPIC\ -Wl,...' 제거.
 
-echo "cmake 추가 플래그:$CMAKE_EXTRA_FLAGS"
-
-# Detect host GCC version and add nvcc override if needed
-if [ "$USE_CUDA" -eq 1 ] && command -v gcc >/dev/null 2>&1; then
-  GCC_VER=$(gcc -dumpfullversion 2>/dev/null || gcc -dumpversion 2>/dev/null || true)
-  GCC_MAJOR=$(echo "$GCC_VER" | cut -d. -f1)
-  if [ -n "$GCC_MAJOR" ] && [ "$GCC_MAJOR" -gt 13 ]; then
-    echo "Host GCC version $GCC_VER > 13: adding --allow-unsupported-compiler for nvcc"
-    # Create an nvcc wrapper that injects --allow-unsupported-compiler so that
-    # CMake's CUDA compiler detection compiles test sources successfully.
-    WRAPPER_DIR="/tmp/nvcc-wrapper-$$"
-    mkdir -p "$WRAPPER_DIR"
-    trap 'rm -rf "$WRAPPER_DIR"' EXIT
-    REAL_NVCC="$NVCC_BIN"
-    if [ -z "$REAL_NVCC" ]; then
-      REAL_NVCC=$(command -v nvcc 2>/dev/null || true)
-    fi
-    if [ -n "$REAL_NVCC" ] && [ -x "$REAL_NVCC" ]; then
-      cat > "$WRAPPER_DIR/nvcc" <<'NVCC_WRAPPER'
-#!/usr/bin/env bash
-# nvcc wrapper to add --allow-unsupported-compiler
-REAL_NVCC="__REAL_NVCC__"
-args=("$@")
-exec "$REAL_NVCC" --allow-unsupported-compiler "${args[@]}"
-NVCC_WRAPPER
-      sed -i "s|__REAL_NVCC__|$REAL_NVCC|g" "$WRAPPER_DIR/nvcc"
-      chmod +x "$WRAPPER_DIR/nvcc"
-      export PATH="$WRAPPER_DIR:$PATH"
-      echo "Created nvcc wrapper at $WRAPPER_DIR/nvcc -> $REAL_NVCC"
-    else
-      echo "Warning: nvcc not found to create wrapper; CMake CUDA detection may still fail." >&2
-    fi
-    # also keep a CMake flag just in case
-    CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler"
-  fi
-fi
-
-# Try to find a suitable system host gcc for nvcc (prefer <=13). If found,
-# pass it to CMake via -DCMAKE_CUDA_HOST_COMPILER so nvcc uses it instead of
-# the conda-provided wrappers which can inject incompatible headers.
+# ─────────────────────────────────────────────
+# 4b. CUDA 전용: host gcc 호환성 처리
+#     CUDA 12.x는 GCC<=13까지 공식 지원. host gcc가 14+면 nvcc가 거부하므로
+#     (1) <=13 host gcc를 찾아 -DCMAKE_CUDA_HOST_COMPILER로 지정
+#     (2) 못 찾으면 --allow-unsupported-compiler 래퍼로 강행
+# ─────────────────────────────────────────────
 if [ "$USE_CUDA" -eq 1 ]; then
-  echo "Searching for a suitable system host gcc for nvcc..."
-  HOST_GCC_CANDIDATES=(/usr/bin/gcc-13 /usr/bin/gcc-12 /usr/bin/gcc-11 /usr/bin/gcc)
+  section "4b. CUDA host gcc 호환성"
+
+  # 적합한 host gcc(<=13) 탐색
   HOST_GCC=""
-  for cand in "${HOST_GCC_CANDIDATES[@]}"; do
+  for cand in /usr/bin/gcc-13 /usr/bin/gcc-12 /usr/bin/gcc-11 /usr/bin/gcc; do
     if [ -x "$cand" ]; then
-      ver=$($cand -dumpfullversion 2>/dev/null || $cand -dumpversion 2>/dev/null || true)
+      ver=$("$cand" -dumpfullversion 2>/dev/null || "$cand" -dumpversion 2>/dev/null || true)
       maj=$(echo "$ver" | cut -d. -f1)
       if [ -n "$maj" ] && [ "$maj" -le 13 ]; then
         HOST_GCC="$cand"
-        echo "Selected host gcc: $HOST_GCC (version $ver)"
+        echo "host gcc 선택: $HOST_GCC (version $ver)"
         break
       fi
     fi
   done
-  if [ -z "$HOST_GCC" ]; then
-    echo "Warning: No suitable host gcc <=13 found under /usr/bin; CUDA build may fail. Falling back to CPU-only build." >&2
-    # disable CUDA to avoid CMake failing
-    CMAKE_EXTRA_FLAGS=$(echo "$CMAKE_EXTRA_FLAGS" | sed 's/-DGGML_CUDA=ON//g')
-    USE_CUDA=0
+
+  if [ -n "$HOST_GCC" ]; then
+    CMAKE_ARGS+=(-DCMAKE_CUDA_HOST_COMPILER="$HOST_GCC")
   else
-    CMAKE_EXTRA_FLAGS="$CMAKE_EXTRA_FLAGS -DCMAKE_CUDA_HOST_COMPILER=$HOST_GCC"
-    # Also ensure nvcc wrapper (if created) uses -ccbin to point to chosen host compiler
-    if [ -n "${WRAPPER_DIR:-}" ] && [ -x "${WRAPPER_DIR}/nvcc" ]; then
-      sed -i "s|exec \"\$REAL_NVCC\" --allow-unsupported-compiler \"\$\{args\[@\]\}\"|exec \"\$REAL_NVCC\" --allow-unsupported-compiler -ccbin=$HOST_GCC \"\$\{args\[@\]\}\"|" "$WRAPPER_DIR/nvcc" 2>/dev/null || true
-      echo "Updated nvcc wrapper to pass -ccbin=$HOST_GCC"
+    # <=13 host gcc가 없음 → CUDA를 끄지 않고, 래퍼로 강행 시도
+    echo "Warning: GCC<=13 미발견 → nvcc에 --allow-unsupported-compiler 래퍼 적용"
+    REAL_NVCC="${NVCC_BIN:-$(command -v nvcc 2>/dev/null || true)}"
+    if [ -n "$REAL_NVCC" ] && [ -x "$REAL_NVCC" ]; then
+      WRAPPER_DIR="/tmp/nvcc-wrapper-$$"
+      mkdir -p "$WRAPPER_DIR"
+      trap 'rm -rf "$WRAPPER_DIR"' EXIT
+      cat > "$WRAPPER_DIR/nvcc" <<NVCC_WRAPPER
+#!/usr/bin/env bash
+exec "$REAL_NVCC" --allow-unsupported-compiler "\$@"
+NVCC_WRAPPER
+      chmod +x "$WRAPPER_DIR/nvcc"
+      export PATH="$WRAPPER_DIR:$PATH"
+      # cmake가 래퍼를 쓰도록 컴파일러 경로를 래퍼로 덮어씀
+      CMAKE_ARGS+=(-DCMAKE_CUDA_COMPILER="$WRAPPER_DIR/nvcc")
+      CMAKE_ARGS+=(-DCMAKE_CUDA_FLAGS=--allow-unsupported-compiler)
+      echo "nvcc 래퍼 생성: $WRAPPER_DIR/nvcc → $REAL_NVCC"
+    else
+      echo "Warning: nvcc 실체를 찾지 못해 래퍼 생성 불가. CUDA 빌드가 실패할 수 있음." >&2
     fi
   fi
 fi
+
+echo "최종 cmake 인자:"
+printf '  %s\n' "${CMAKE_ARGS[@]}"
 
 # ─────────────────────────────────────────────
 # 5. 클론
@@ -306,15 +350,9 @@ section "6. cmake 빌드"
 
 pushd "$BUILD_DIR" >/dev/null
 
-CUDA_COMPILER_FLAG=""
-[ -n "$NVCC_BIN" ] && CUDA_COMPILER_FLAG="-DCMAKE_CUDA_COMPILER=$NVCC_BIN"
-
 echo "Configuring..."
-"$CMAKE_BIN" -B build \
-  -DCMAKE_BUILD_TYPE=Release \
-  -DLLAMA_BUILD_SERVER=ON \
-  $CUDA_COMPILER_FLAG \
-  $CMAKE_EXTRA_FLAGS
+# 배열 전개("${CMAKE_ARGS[@]}")로 각 인자가 공백을 포함해도 안전하게 전달됨
+"$CMAKE_BIN" -B build "${CMAKE_ARGS[@]}"
 
 echo ""
 echo "Building..."
@@ -411,12 +449,20 @@ done
 # ─────────────────────────────────────────────
 # 10. 완료
 # ─────────────────────────────────────────────
+# 사용한 백엔드 라벨 계산
+if   [ "$USE_CUDA"  -eq 1 ]; then BACKEND_LABEL="CUDA ($NVCC_BIN)"
+elif [ "$USE_ROCM"  -eq 1 ]; then BACKEND_LABEL="ROCm/HIP"
+elif [ "$USE_METAL" -eq 1 ]; then BACKEND_LABEL="Metal"
+else                              BACKEND_LABEL="CPU-only"
+fi
+
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Build & install complete!"
 echo "  Binary  : $TARGET_BIN"
 echo "  Version : $CLONE_REF"
-echo "  CUDA    : $([ $USE_CUDA -eq 1 ] && echo "ON ($NVCC_BIN)" || echo "OFF (CPU-only)")"
+echo "  Arch    : $ARCH_NAME"
+echo "  Backend : $BACKEND_LABEL"
 echo ""
 echo " 런타임 시 LD_LIBRARY_PATH 필요:"
 echo "  export LD_LIBRARY_PATH=$INSTALL_DIR:\$LD_LIBRARY_PATH"
