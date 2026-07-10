@@ -41,6 +41,7 @@ usage() {
   --llama-port PORT   llama-server 내부 포트 (기본값: 8080, run_llama_server.sh 와 맞춰야 함)
   --user USER         Basic Auth 사용자명 (기본값: admin)
   --password PASS     Basic Auth 비밀번호 (생략 시 대화형 입력)
+  --domain DOMAINS    접속 허용 도메인 (쉼표로 여러 개, 자체서명 인증서에 포함됨)
   --force             기존 Caddyfile 덮어쓰기 확인 생략
   --stop              실행 중인 Caddy 종료
   -h, --help          도움말
@@ -48,6 +49,7 @@ usage() {
 예시:
   bash setup_secure_server.sh --password MySecret123
   bash setup_secure_server.sh --port 9443 --user john --password MySecret123
+  bash setup_secure_server.sh --password secret --domain snu.lota7574.kro.kr
   bash setup_secure_server.sh --password secret --llama-port 1234   # run이 --port 1234 사용 시
   bash setup_secure_server.sh --stop
 EOF
@@ -58,6 +60,7 @@ EOF
 HTTPS_PORT=8443
 USERNAME="admin"
 PASSWORD=""
+DOMAINS=""
 FORCE=false
 STOP=false
 
@@ -67,6 +70,7 @@ while [[ $# -gt 0 ]]; do
     --llama-port)  LLAMA_PORT="$2"; shift 2 ;;
     --user)        USERNAME="$2"; shift 2 ;;
     --password)    PASSWORD="$2"; shift 2 ;;
+    --domain)      DOMAINS="$2"; shift 2 ;;
     --force)       FORCE=true; shift ;;
     --stop)        STOP=true; shift ;;
     -h|--help)     usage ;;
@@ -170,6 +174,36 @@ echo -e "${BOLD}▶ Step 4: Caddyfile 생성${RESET}"
 
 mkdir -p "$CADDY_DIR" "$CADDY_DATA_DIR"
 
+# systemd caddy 서비스는 'caddy' 유저로 실행되므로 홈 디렉터리(.caddy)에
+# 접근할 수 없다. 이 경우 caddy 유저가 쓸 수 있는 표준 경로를 사용한다.
+SYSTEMD_MODE=false
+if systemctl is-active --quiet caddy 2>/dev/null; then
+  SYSTEMD_MODE=true
+  ACCESS_LOG="/var/log/caddy/access.log"   # caddy 패키지가 caddy 소유로 생성
+  STORAGE_ROOT="/var/lib/caddy"            # systemd 기본 데이터 경로
+else
+  ACCESS_LOG="$CADDY_DIR/access.log"
+  STORAGE_ROOT="$CADDY_DATA_DIR"
+fi
+
+# tls internal 은 인증서를 발급할 호스트명/IP 가 있어야 한다.
+# 포트만(:8443) 지정하면 SNI 에 맞는 인증서가 없어 핸드셰이크가 실패하므로
+# localhost + 이 서버의 모든 IP 를 사이트 주소로 명시한다.
+ADDR_LIST="https://localhost:$HTTPS_PORT https://127.0.0.1:$HTTPS_PORT"
+for ip in $(hostname -I 2>/dev/null); do
+  ADDR_LIST="$ADDR_LIST https://${ip}:$HTTPS_PORT"
+done
+# --domain 으로 받은 도메인(쉼표 구분)도 인증서 대상에 추가
+if [[ -n "$DOMAINS" ]]; then
+  IFS=',' read -ra _doms <<< "$DOMAINS"
+  for d in "${_doms[@]}"; do
+    d="$(echo "$d" | xargs)"   # 앞뒤 공백 제거
+    [[ -n "$d" ]] && ADDR_LIST="$ADDR_LIST https://${d}:$HTTPS_PORT"
+  done
+fi
+SITE_ADDR=$(echo "$ADDR_LIST" | sed 's/ /, /g')
+info "  인증서 발급 대상: $SITE_ADDR"
+
 if [[ -f "$CADDYFILE" ]] && ! $FORCE; then
   warn "  기존 Caddyfile 존재: $CADDYFILE"
   echo -ne "  덮어쓰시겠습니까? [y/N]: "
@@ -182,16 +216,22 @@ fi
   printf "# llama-server HTTPS 리버스 프록시\n"
   printf "# 생성: %s\n\n" "$(date '+%Y-%m-%d %H:%M:%S')"
   printf "{\n"
-  printf "    # Caddy 관리 API 비활성화 (보안)\n"
-  printf "    admin off\n"
+  if $SYSTEMD_MODE; then
+    # systemd 의 ExecReload 는 admin API(localhost:2019)로 reload 하므로
+    # admin off 를 켜면 이후 'systemctl reload' 가 실패한다 → 켜둔다.
+    printf "    # (systemd 모드: reload 위해 admin API 유지)\n"
+  else
+    printf "    # Caddy 관리 API 비활성화 (보안)\n"
+    printf "    admin off\n"
+  fi
   printf "\n"
   printf "    # 인증서/데이터 저장 위치\n"
   printf "    storage file_system {\n"
-  printf "        root %s\n" "$CADDY_DATA_DIR"
+  printf "        root %s\n" "$STORAGE_ROOT"
   printf "    }\n"
   printf "}\n\n"
   printf "# 외부 HTTPS 접속 엔드포인트\n"
-  printf ":%s {\n" "$HTTPS_PORT"
+  printf "%s {\n" "$SITE_ADDR"
   printf "    # 자체 서명 인증서 (브라우저에서 경고 발생 — '고급'→'계속' 클릭)\n"
   printf "    tls internal\n"
   printf "\n"
@@ -204,7 +244,7 @@ fi
   printf "    reverse_proxy localhost:%s\n" "$LLAMA_PORT"
   printf "\n"
   printf "    log {\n"
-  printf "        output file %s/access.log {\n" "$CADDY_DIR"
+  printf "        output file %s {\n" "$ACCESS_LOG"
   printf "            roll_size 10mb\n"
   printf "            roll_keep 3\n"
   printf "        }\n"
@@ -230,11 +270,15 @@ if [[ -f "$CADDY_PID_FILE" ]]; then
 fi
 
 # systemd caddy 서비스가 이미 실행 중이면 그쪽에 적용
-if systemctl is-active --quiet caddy 2>/dev/null; then
+if $SYSTEMD_MODE; then
   info "  systemd caddy 서비스 감지됨 — /etc/caddy/Caddyfile 에 복사"
   sudo cp "$CADDYFILE" /etc/caddy/Caddyfile
-  sudo systemctl reload caddy
-  success "  systemd Caddy 리로드 완료"
+  # reload 가 실패하면 (잘못된 설정 잔존 등) restart 로 폴백
+  if ! sudo systemctl reload caddy; then
+    warn "  reload 실패 — restart 로 재시도"
+    sudo systemctl restart caddy
+  fi
+  success "  systemd Caddy 적용 완료"
 else
   # Caddyfile 문법 검증
   caddy validate --config "$CADDYFILE" --adapter caddyfile 2>/dev/null \
