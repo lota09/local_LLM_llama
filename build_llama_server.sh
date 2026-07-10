@@ -8,6 +8,9 @@ set -euo pipefail
 #   - CPU 아키텍처 무관 (x86_64 / ARM64 등)
 #   - 가속 백엔드 자동 감지: CUDA(NVIDIA) / ROCm(AMD) / Metal(macOS) / CPU-only
 #   - 빌드 플래그를 "문자열"이 아닌 "배열"로 누적하여 공백/이식성 문제 원천 차단
+#   - [FIX] 런타임에 필요한 공유 라이브러리를 사람이 이름으로 나열하지 않고
+#           ldd로 자동 탐지 → libmtmd.so 같은 신규 라이브러리가 업스트림에
+#           추가돼도 스크립트 수정 없이 자동으로 따라간다.
 
 REPO_URL=${REPO_URL:-https://github.com/ggerganov/llama.cpp.git}
 BUILD_DIR=${BUILD_DIR:-/tmp/llama_build}
@@ -227,6 +230,79 @@ CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE=Release)
 CMAKE_ARGS+=(-DLLAMA_BUILD_SERVER=ON)
 CMAKE_ARGS+=(-DCMAKE_CXX_STANDARD=17)
 
+# ─────────────────────────────────────────────
+# SSL(OpenSSL) 지원 — 두 가지 이유로 필요:
+#   1) 서버 자체 HTTPS 서빙(--ssl-key/--ssl-cert)
+#   2) cors-proxy 가 외부 HTTPS(MCP 서버 등)로 아웃바운드 요청 (CPPHTTPLIB_OPENSSL_SUPPORT)
+# OpenSSL 개발 헤더가 없으면 --ui-mcp-proxy 사용 시
+#   "HTTPS requested but CPPHTTPLIB_OPENSSL_SUPPORT is not defined" 로 실패한다.
+#
+# 탐색 우선순위(권한 부담이 적은 순): 시스템 헤더 → conda → conda 설치(무권한) → sudo(best-effort).
+# 끝까지 못 구하면 '경고만' 내고 SSL 없이 빌드(빌드 자체는 성공)한다.
+# 런타임 libssl/libcrypto 는 더 이상 여기서 직접 챙기지 않는다 — 9번 섹션의
+# ldd 기반 자동 탐지가 실제로 링크된 libssl/libcrypto를 알아서 찾아 복사한다.
+USE_SSL=0
+
+# (a) 시스템 헤더가 있으면 그대로 사용 (root dir 지정 불필요)
+if [ -f /usr/include/openssl/ssl.h ]; then
+  echo "시스템 OpenSSL 헤더 사용: /usr/include/openssl"
+  USE_SSL=1
+fi
+
+# (b) 없으면 conda(활성 env → llama_env → base 등)에서 탐색 (무권한)
+if [ "$USE_SSL" -eq 0 ]; then
+  OSSL_SEARCH=()
+  [ -n "${CONDA_PREFIX:-}" ] && OSSL_SEARCH+=("$CONDA_PREFIX")
+  OSSL_SEARCH+=("$HOME/miniconda3/envs/llama_env" "$HOME/miniconda3" \
+               "$HOME/anaconda3/envs/llama_env" "$HOME/anaconda3" "/opt/conda")
+  for root in "${OSSL_SEARCH[@]}"; do
+    if [ -f "$root/include/openssl/ssl.h" ] && ls "$root"/lib/libssl.so* >/dev/null 2>&1; then
+      echo "conda OpenSSL 사용: $root"
+      CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root")
+      USE_SSL=1
+      break
+    fi
+  done
+fi
+
+# (c) 그래도 없으면 conda 로 설치 시도 (무권한)
+if [ "$USE_SSL" -eq 0 ] && [ -n "$CMAKE_BIN" ]; then
+  CONDA_CMD=""
+  for root in "${CONDA_ROOTS[@]:-}"; do
+    [ -n "$root" ] && [ -x "$root/bin/conda" ] && CONDA_CMD="$root/bin/conda" && break
+  done
+  if [ -n "$CONDA_CMD" ]; then
+    echo "conda 로 OpenSSL 설치 시도 (무권한)..."
+    "$CONDA_CMD" install -y -c conda-forge openssl 2>&1 | tail -3 || true
+    for root in "${CONDA_ROOTS[@]:-}"; do
+      if [ -f "$root/include/openssl/ssl.h" ] && ls "$root"/lib/libssl.so* >/dev/null 2>&1; then
+        CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root"); USE_SSL=1; break
+      fi
+    done
+  fi
+fi
+
+# (d) 최후의 수단: 시스템 패키지(best-effort). 실패해도 빌드는 계속.
+if [ "$USE_SSL" -eq 0 ]; then
+  echo "무권한 경로 실패 → 시스템 패키지(sudo) best-effort 시도"
+  if   command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y libssl-dev    2>&1 | tail -2 || true
+  elif command -v dnf     >/dev/null 2>&1; then sudo dnf     install -y openssl-devel 2>&1 | tail -2 || true
+  elif command -v yum     >/dev/null 2>&1; then sudo yum     install -y openssl-devel 2>&1 | tail -2 || true
+  elif command -v pacman  >/dev/null 2>&1; then sudo pacman  -S --noconfirm openssl   2>&1 | tail -2 || true
+  fi
+  [ -f /usr/include/openssl/ssl.h ] && USE_SSL=1
+fi
+
+# 결과 반영
+if [ "$USE_SSL" -eq 1 ]; then
+  echo "SSL 활성화: -DLLAMA_SERVER_SSL=ON"
+  CMAKE_ARGS+=(-DLLAMA_SERVER_SSL=ON)
+else
+  echo "⚠️  OpenSSL 을 확보하지 못했습니다 → SSL 없이 빌드합니다."
+  echo "    이 경우 --ui-mcp-proxy 로 외부 HTTPS MCP(예: Tavily) 연결이 동작하지 않습니다."
+  echo "    무권한 해결: conda install -c conda-forge openssl  (또는 관리자에게 libssl-dev 요청)"
+fi
+
 # 백엔드별 플래그
 if [ "$USE_CUDA" -eq 1 ]; then
   echo "CUDA 빌드 활성화: -DGGML_CUDA=ON"
@@ -412,6 +488,15 @@ echo "발견: $FOUND_BIN"
 # ─────────────────────────────────────────────
 section "8. 설치"
 
+# 설치 전 실행 중인 llama-server 종료.
+#   - 실행 중이면 바이너리 파일을 잡고 있어 덮어쓰기가 "Text file busy"(ETXTBSY)로 실패한다.
+#   - 종료해 두면 설치가 확실해지고, 다음 기동(run_llama_server.sh) 때 새 바이너리가 반영된다.
+#   (run_llama_server.sh 도 기동 시 pkill 하지만, 빌드 단계에서 미리 정리해 설치 실패를 원천 차단)
+if pgrep -f "$INSTALL_DIR/llama-server" >/dev/null 2>&1 || pgrep -x llama-server >/dev/null 2>&1; then
+  echo "실행 중인 llama-server 종료 (설치 충돌 방지)"
+  pkill -9 -f "llama-server" 2>/dev/null || true
+fi
+
 mkdir -p "$INSTALL_DIR"
 
 if [ -f "$INSTALL_DIR/llama-server" ]; then
@@ -421,30 +506,61 @@ if [ -f "$INSTALL_DIR/llama-server" ]; then
 fi
 
 TARGET_BIN="$INSTALL_DIR/llama-server"
-cp "$FOUND_BIN" "$TARGET_BIN"
-chmod +x "$TARGET_BIN"
+# 주의: 서버가 실행 중이면 바이너리 파일을 잡고 있어 cp 가 덮어쓰기 실패한다
+#   ("cp: cannot create regular file ...: Text file busy" / ETXTBSY).
+# 해결: 같은 디렉터리에 임시 파일로 복사한 뒤 mv(원자적 rename)로 교체.
+# rename 은 실행 파일을 write 모드로 열지 않으므로 ETXTBSY 가 발생하지 않으며,
+# 실행 중이던 프로세스는 옛 inode 를 계속 사용하다가 재시작 시 새 바이너리로 전환된다.
+cp "$FOUND_BIN" "$TARGET_BIN.new"
+chmod +x "$TARGET_BIN.new"
+mv -f "$TARGET_BIN.new" "$TARGET_BIN"
 echo "설치 완료: $TARGET_BIN"
 
-# 구버전 공유 라이브러리 제거 (심볼릭 링크 불일치 방지)
-find "$INSTALL_DIR" -maxdepth 1 \( \
-    -name 'libllama*.so*' -o -name 'libggml*.so*' \
-    -o -name 'libllama*.dylib' -o -name 'libggml*.dylib' \
-  \) -delete 2>/dev/null || true
+# [FIX] 구버전 공유 라이브러리 전체 제거 (버전 불일치 방지).
+# 예전엔 'libllama*/libggml*' 패턴만 지웠는데, 그러면 예를 들어 libmtmd.so처럼
+# 다른 이름의 구버전 라이브러리가 새 버전과 뒤섞여 남을 수 있었다.
+# 9번 섹션이 ldd로 필요한 걸 전부 다시 채워 넣으므로, 여기서는 안전하게 전부 지운다.
+find "$INSTALL_DIR" -maxdepth 1 -type f \( -name '*.so*' -o -name '*.dylib' \) -delete 2>/dev/null || true
 
 # ─────────────────────────────────────────────
-# 9. 공유 라이브러리 복사
+# 9. 공유 라이브러리 복사 (ldd 기반 자동 탐지)
 # ─────────────────────────────────────────────
 section "9. 공유 라이브러리 복사"
 
-find "$BUILD_DIR/build" -maxdepth 4 \( -type f -o -type l \) \( \
-    -name 'libllama*.so*' \
-    -o -name 'libggml*.so*' \
-    -o -name 'libllama*.dylib' \
-    -o -name 'libggml*.dylib' \
-  \) | while read -r lib; do
-  echo "  -> $(basename "$lib")"
+# [FIX] 예전 방식: 'libllama*.so*', 'libggml*.so*' 처럼 사람이 이름을 미리 나열해서
+#       find로 복사 → 업스트림이 libmtmd.so 같은 새 라이브러리를 추가하면 못 잡아냄
+#       (실제로 이 문제로 "error while loading shared libraries: libmtmd.so.0" 발생).
+#
+# [FIX] 새 방식: ldd로 "이 실행 파일이 실제로 필요로 하는 라이브러리"를 링커에게
+#       직접 물어봐서 그대로 복사. 이름을 몰라도 되고, 업스트림이 뭘 추가하든
+#       자동으로 따라간다. 표준 시스템 경로(/lib, /usr/lib 등)에 있는 건 이미
+#       시스템에 존재하는 것이므로 복사하지 않는다.
+#
+# FOUND_BIN(빌드 트리 안의 원본)을 기준으로 조회한다. 빌드 트리 실행 파일은
+# cmake가 설정한 RPATH로 build/ 내부 라이브러리를 바로 찾을 수 있어 ldd가
+# 정확히 해석된 경로를 보여준다.
+echo "ldd로 런타임 의존성 탐지 중: $FOUND_BIN"
+ldd "$FOUND_BIN" 2>/dev/null | grep '=>' | awk '{print $3}' | sort -u | while read -r lib; do
+  [ -z "$lib" ] && continue
+  [ -f "$lib" ] || continue
+  case "$lib" in
+    /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*)
+      # 시스템 표준 라이브러리(glibc, libstdc++, libcuda 드라이버 등) — 이미 시스템에 있음
+      continue
+      ;;
+  esac
+  echo "  -> $(basename "$lib")  (from $lib)"
   cp -a "$lib" "$INSTALL_DIR/" || true
 done
+
+echo ""
+echo "설치된 바이너리의 최종 의존성 확인 (LD_LIBRARY_PATH=$INSTALL_DIR 기준):"
+if LD_LIBRARY_PATH="$INSTALL_DIR:${LD_LIBRARY_PATH:-}" ldd "$TARGET_BIN" | grep -qi "not found"; then
+  echo "⚠️  다음 라이브러리를 찾지 못했습니다 (서버가 기동 실패할 수 있음):"
+  LD_LIBRARY_PATH="$INSTALL_DIR:${LD_LIBRARY_PATH:-}" ldd "$TARGET_BIN" | grep -i "not found"
+else
+  echo "  모든 런타임 의존성 정상 확인됨."
+fi
 
 # ─────────────────────────────────────────────
 # 10. 완료
