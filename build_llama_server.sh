@@ -8,6 +8,9 @@ set -euo pipefail
 #   - CPU 아키텍처 무관 (x86_64 / ARM64 등)
 #   - 가속 백엔드 자동 감지: CUDA(NVIDIA) / ROCm(AMD) / Metal(macOS) / CPU-only
 #   - 빌드 플래그를 "문자열"이 아닌 "배열"로 누적하여 공백/이식성 문제 원천 차단
+#   - [FIX] 런타임에 필요한 공유 라이브러리를 사람이 이름으로 나열하지 않고
+#           ldd로 자동 탐지 → libmtmd.so 같은 신규 라이브러리가 업스트림에
+#           추가돼도 스크립트 수정 없이 자동으로 따라간다.
 
 REPO_URL=${REPO_URL:-https://github.com/ggerganov/llama.cpp.git}
 BUILD_DIR=${BUILD_DIR:-/tmp/llama_build}
@@ -236,9 +239,9 @@ CMAKE_ARGS+=(-DCMAKE_CXX_STANDARD=17)
 #
 # 탐색 우선순위(권한 부담이 적은 순): 시스템 헤더 → conda → conda 설치(무권한) → sudo(best-effort).
 # 끝까지 못 구하면 '경고만' 내고 SSL 없이 빌드(빌드 자체는 성공)한다.
-# OSSL_LIB_DIR 가 채워지면 9번 단계에서 해당 libssl/libcrypto 를 설치 디렉터리에 번들한다.
+# 런타임 libssl/libcrypto 는 더 이상 여기서 직접 챙기지 않는다 — 9번 섹션의
+# ldd 기반 자동 탐지가 실제로 링크된 libssl/libcrypto를 알아서 찾아 복사한다.
 USE_SSL=0
-OSSL_LIB_DIR=""
 
 # (a) 시스템 헤더가 있으면 그대로 사용 (root dir 지정 불필요)
 if [ -f /usr/include/openssl/ssl.h ]; then
@@ -256,7 +259,6 @@ if [ "$USE_SSL" -eq 0 ]; then
     if [ -f "$root/include/openssl/ssl.h" ] && ls "$root"/lib/libssl.so* >/dev/null 2>&1; then
       echo "conda OpenSSL 사용: $root"
       CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root")
-      OSSL_LIB_DIR="$root/lib"
       USE_SSL=1
       break
     fi
@@ -274,7 +276,7 @@ if [ "$USE_SSL" -eq 0 ] && [ -n "$CMAKE_BIN" ]; then
     "$CONDA_CMD" install -y -c conda-forge openssl 2>&1 | tail -3 || true
     for root in "${CONDA_ROOTS[@]:-}"; do
       if [ -f "$root/include/openssl/ssl.h" ] && ls "$root"/lib/libssl.so* >/dev/null 2>&1; then
-        CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root"); OSSL_LIB_DIR="$root/lib"; USE_SSL=1; break
+        CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root"); USE_SSL=1; break
       fi
     done
   fi
@@ -514,37 +516,50 @@ chmod +x "$TARGET_BIN.new"
 mv -f "$TARGET_BIN.new" "$TARGET_BIN"
 echo "설치 완료: $TARGET_BIN"
 
-# 구버전 공유 라이브러리 제거 (심볼릭 링크 불일치 방지)
-find "$INSTALL_DIR" -maxdepth 1 \( \
-    -name 'libllama*.so*' -o -name 'libggml*.so*' \
-    -o -name 'libllama*.dylib' -o -name 'libggml*.dylib' \
-  \) -delete 2>/dev/null || true
+# [FIX] 구버전 공유 라이브러리 전체 제거 (버전 불일치 방지).
+# 예전엔 'libllama*/libggml*' 패턴만 지웠는데, 그러면 예를 들어 libmtmd.so처럼
+# 다른 이름의 구버전 라이브러리가 새 버전과 뒤섞여 남을 수 있었다.
+# 9번 섹션이 ldd로 필요한 걸 전부 다시 채워 넣으므로, 여기서는 안전하게 전부 지운다.
+find "$INSTALL_DIR" -maxdepth 1 -type f \( -name '*.so*' -o -name '*.dylib' \) -delete 2>/dev/null || true
 
 # ─────────────────────────────────────────────
-# 9. 공유 라이브러리 복사
+# 9. 공유 라이브러리 복사 (ldd 기반 자동 탐지)
 # ─────────────────────────────────────────────
 section "9. 공유 라이브러리 복사"
 
-find "$BUILD_DIR/build" -maxdepth 4 \( -type f -o -type l \) \( \
-    -name 'libllama*.so*' \
-    -o -name 'libggml*.so*' \
-    -o -name 'libllama*.dylib' \
-    -o -name 'libggml*.dylib' \
-  \) | while read -r lib; do
-  echo "  -> $(basename "$lib")"
+# [FIX] 예전 방식: 'libllama*.so*', 'libggml*.so*' 처럼 사람이 이름을 미리 나열해서
+#       find로 복사 → 업스트림이 libmtmd.so 같은 새 라이브러리를 추가하면 못 잡아냄
+#       (실제로 이 문제로 "error while loading shared libraries: libmtmd.so.0" 발생).
+#
+# [FIX] 새 방식: ldd로 "이 실행 파일이 실제로 필요로 하는 라이브러리"를 링커에게
+#       직접 물어봐서 그대로 복사. 이름을 몰라도 되고, 업스트림이 뭘 추가하든
+#       자동으로 따라간다. 표준 시스템 경로(/lib, /usr/lib 등)에 있는 건 이미
+#       시스템에 존재하는 것이므로 복사하지 않는다.
+#
+# FOUND_BIN(빌드 트리 안의 원본)을 기준으로 조회한다. 빌드 트리 실행 파일은
+# cmake가 설정한 RPATH로 build/ 내부 라이브러리를 바로 찾을 수 있어 ldd가
+# 정확히 해석된 경로를 보여준다.
+echo "ldd로 런타임 의존성 탐지 중: $FOUND_BIN"
+ldd "$FOUND_BIN" 2>/dev/null | grep '=>' | awk '{print $3}' | sort -u | while read -r lib; do
+  [ -z "$lib" ] && continue
+  [ -f "$lib" ] || continue
+  case "$lib" in
+    /lib/*|/lib64/*|/usr/lib/*|/usr/lib64/*)
+      # 시스템 표준 라이브러리(glibc, libstdc++, libcuda 드라이버 등) — 이미 시스템에 있음
+      continue
+      ;;
+  esac
+  echo "  -> $(basename "$lib")  (from $lib)"
   cp -a "$lib" "$INSTALL_DIR/" || true
 done
 
-# conda OpenSSL 로 빌드한 경우, 런타임에 libssl/libcrypto 가 잡히도록 설치 디렉터리에 번들.
-# (시스템 OpenSSL 로 빌드한 경우 OSSL_LIB_DIR 가 비어 있어 이 블록은 건너뜀)
-if [ -n "${OSSL_LIB_DIR:-}" ] && [ -d "$OSSL_LIB_DIR" ]; then
-  echo "OpenSSL 런타임 라이브러리 번들: $OSSL_LIB_DIR"
-  for so in libssl libcrypto; do
-    find "$OSSL_LIB_DIR" -maxdepth 1 -name "$so.so*" 2>/dev/null | while read -r lib; do
-      echo "  -> $(basename "$lib")"
-      cp -a "$lib" "$INSTALL_DIR/" || true
-    done
-  done
+echo ""
+echo "설치된 바이너리의 최종 의존성 확인 (LD_LIBRARY_PATH=$INSTALL_DIR 기준):"
+if LD_LIBRARY_PATH="$INSTALL_DIR:${LD_LIBRARY_PATH:-}" ldd "$TARGET_BIN" | grep -qi "not found"; then
+  echo "⚠️  다음 라이브러리를 찾지 못했습니다 (서버가 기동 실패할 수 있음):"
+  LD_LIBRARY_PATH="$INSTALL_DIR:${LD_LIBRARY_PATH:-}" ldd "$TARGET_BIN" | grep -i "not found"
+else
+  echo "  모든 런타임 의존성 정상 확인됨."
 fi
 
 # ─────────────────────────────────────────────
