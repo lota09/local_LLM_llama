@@ -227,6 +227,80 @@ CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE=Release)
 CMAKE_ARGS+=(-DLLAMA_BUILD_SERVER=ON)
 CMAKE_ARGS+=(-DCMAKE_CXX_STANDARD=17)
 
+# ─────────────────────────────────────────────
+# SSL(OpenSSL) 지원 — 두 가지 이유로 필요:
+#   1) 서버 자체 HTTPS 서빙(--ssl-key/--ssl-cert)
+#   2) cors-proxy 가 외부 HTTPS(MCP 서버 등)로 아웃바운드 요청 (CPPHTTPLIB_OPENSSL_SUPPORT)
+# OpenSSL 개발 헤더가 없으면 --ui-mcp-proxy 사용 시
+#   "HTTPS requested but CPPHTTPLIB_OPENSSL_SUPPORT is not defined" 로 실패한다.
+#
+# 탐색 우선순위(권한 부담이 적은 순): 시스템 헤더 → conda → conda 설치(무권한) → sudo(best-effort).
+# 끝까지 못 구하면 '경고만' 내고 SSL 없이 빌드(빌드 자체는 성공)한다.
+# OSSL_LIB_DIR 가 채워지면 9번 단계에서 해당 libssl/libcrypto 를 설치 디렉터리에 번들한다.
+USE_SSL=0
+OSSL_LIB_DIR=""
+
+# (a) 시스템 헤더가 있으면 그대로 사용 (root dir 지정 불필요)
+if [ -f /usr/include/openssl/ssl.h ]; then
+  echo "시스템 OpenSSL 헤더 사용: /usr/include/openssl"
+  USE_SSL=1
+fi
+
+# (b) 없으면 conda(활성 env → llama_env → base 등)에서 탐색 (무권한)
+if [ "$USE_SSL" -eq 0 ]; then
+  OSSL_SEARCH=()
+  [ -n "${CONDA_PREFIX:-}" ] && OSSL_SEARCH+=("$CONDA_PREFIX")
+  OSSL_SEARCH+=("$HOME/miniconda3/envs/llama_env" "$HOME/miniconda3" \
+               "$HOME/anaconda3/envs/llama_env" "$HOME/anaconda3" "/opt/conda")
+  for root in "${OSSL_SEARCH[@]}"; do
+    if [ -f "$root/include/openssl/ssl.h" ] && ls "$root"/lib/libssl.so* >/dev/null 2>&1; then
+      echo "conda OpenSSL 사용: $root"
+      CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root")
+      OSSL_LIB_DIR="$root/lib"
+      USE_SSL=1
+      break
+    fi
+  done
+fi
+
+# (c) 그래도 없으면 conda 로 설치 시도 (무권한)
+if [ "$USE_SSL" -eq 0 ] && [ -n "$CMAKE_BIN" ]; then
+  CONDA_CMD=""
+  for root in "${CONDA_ROOTS[@]:-}"; do
+    [ -n "$root" ] && [ -x "$root/bin/conda" ] && CONDA_CMD="$root/bin/conda" && break
+  done
+  if [ -n "$CONDA_CMD" ]; then
+    echo "conda 로 OpenSSL 설치 시도 (무권한)..."
+    "$CONDA_CMD" install -y -c conda-forge openssl 2>&1 | tail -3 || true
+    for root in "${CONDA_ROOTS[@]:-}"; do
+      if [ -f "$root/include/openssl/ssl.h" ] && ls "$root"/lib/libssl.so* >/dev/null 2>&1; then
+        CMAKE_ARGS+=(-DOPENSSL_ROOT_DIR="$root"); OSSL_LIB_DIR="$root/lib"; USE_SSL=1; break
+      fi
+    done
+  fi
+fi
+
+# (d) 최후의 수단: 시스템 패키지(best-effort). 실패해도 빌드는 계속.
+if [ "$USE_SSL" -eq 0 ]; then
+  echo "무권한 경로 실패 → 시스템 패키지(sudo) best-effort 시도"
+  if   command -v apt-get >/dev/null 2>&1; then sudo apt-get install -y libssl-dev    2>&1 | tail -2 || true
+  elif command -v dnf     >/dev/null 2>&1; then sudo dnf     install -y openssl-devel 2>&1 | tail -2 || true
+  elif command -v yum     >/dev/null 2>&1; then sudo yum     install -y openssl-devel 2>&1 | tail -2 || true
+  elif command -v pacman  >/dev/null 2>&1; then sudo pacman  -S --noconfirm openssl   2>&1 | tail -2 || true
+  fi
+  [ -f /usr/include/openssl/ssl.h ] && USE_SSL=1
+fi
+
+# 결과 반영
+if [ "$USE_SSL" -eq 1 ]; then
+  echo "SSL 활성화: -DLLAMA_SERVER_SSL=ON"
+  CMAKE_ARGS+=(-DLLAMA_SERVER_SSL=ON)
+else
+  echo "⚠️  OpenSSL 을 확보하지 못했습니다 → SSL 없이 빌드합니다."
+  echo "    이 경우 --ui-mcp-proxy 로 외부 HTTPS MCP(예: Tavily) 연결이 동작하지 않습니다."
+  echo "    무권한 해결: conda install -c conda-forge openssl  (또는 관리자에게 libssl-dev 요청)"
+fi
+
 # 백엔드별 플래그
 if [ "$USE_CUDA" -eq 1 ]; then
   echo "CUDA 빌드 활성화: -DGGML_CUDA=ON"
@@ -412,6 +486,15 @@ echo "발견: $FOUND_BIN"
 # ─────────────────────────────────────────────
 section "8. 설치"
 
+# 설치 전 실행 중인 llama-server 종료.
+#   - 실행 중이면 바이너리 파일을 잡고 있어 덮어쓰기가 "Text file busy"(ETXTBSY)로 실패한다.
+#   - 종료해 두면 설치가 확실해지고, 다음 기동(run_llama_server.sh) 때 새 바이너리가 반영된다.
+#   (run_llama_server.sh 도 기동 시 pkill 하지만, 빌드 단계에서 미리 정리해 설치 실패를 원천 차단)
+if pgrep -f "$INSTALL_DIR/llama-server" >/dev/null 2>&1 || pgrep -x llama-server >/dev/null 2>&1; then
+  echo "실행 중인 llama-server 종료 (설치 충돌 방지)"
+  pkill -9 -f "llama-server" 2>/dev/null || true
+fi
+
 mkdir -p "$INSTALL_DIR"
 
 if [ -f "$INSTALL_DIR/llama-server" ]; then
@@ -421,8 +504,14 @@ if [ -f "$INSTALL_DIR/llama-server" ]; then
 fi
 
 TARGET_BIN="$INSTALL_DIR/llama-server"
-cp "$FOUND_BIN" "$TARGET_BIN"
-chmod +x "$TARGET_BIN"
+# 주의: 서버가 실행 중이면 바이너리 파일을 잡고 있어 cp 가 덮어쓰기 실패한다
+#   ("cp: cannot create regular file ...: Text file busy" / ETXTBSY).
+# 해결: 같은 디렉터리에 임시 파일로 복사한 뒤 mv(원자적 rename)로 교체.
+# rename 은 실행 파일을 write 모드로 열지 않으므로 ETXTBSY 가 발생하지 않으며,
+# 실행 중이던 프로세스는 옛 inode 를 계속 사용하다가 재시작 시 새 바이너리로 전환된다.
+cp "$FOUND_BIN" "$TARGET_BIN.new"
+chmod +x "$TARGET_BIN.new"
+mv -f "$TARGET_BIN.new" "$TARGET_BIN"
 echo "설치 완료: $TARGET_BIN"
 
 # 구버전 공유 라이브러리 제거 (심볼릭 링크 불일치 방지)
@@ -445,6 +534,18 @@ find "$BUILD_DIR/build" -maxdepth 4 \( -type f -o -type l \) \( \
   echo "  -> $(basename "$lib")"
   cp -a "$lib" "$INSTALL_DIR/" || true
 done
+
+# conda OpenSSL 로 빌드한 경우, 런타임에 libssl/libcrypto 가 잡히도록 설치 디렉터리에 번들.
+# (시스템 OpenSSL 로 빌드한 경우 OSSL_LIB_DIR 가 비어 있어 이 블록은 건너뜀)
+if [ -n "${OSSL_LIB_DIR:-}" ] && [ -d "$OSSL_LIB_DIR" ]; then
+  echo "OpenSSL 런타임 라이브러리 번들: $OSSL_LIB_DIR"
+  for so in libssl libcrypto; do
+    find "$OSSL_LIB_DIR" -maxdepth 1 -name "$so.so*" 2>/dev/null | while read -r lib; do
+      echo "  -> $(basename "$lib")"
+      cp -a "$lib" "$INSTALL_DIR/" || true
+    done
+  done
+fi
 
 # ─────────────────────────────────────────────
 # 10. 완료

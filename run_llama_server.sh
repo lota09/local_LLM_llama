@@ -236,7 +236,7 @@ fi
 
 # Flash Attention(-fa) & Q4 KV cache applies
 # --host 127.0.0.1: 로컬 전용 (외부 HTTP 차단 — 외부 접근은 Caddy HTTPS 사용)
-ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4_0 --reasoning on )
+ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4_0 --reasoning on --tools all --ui-mcp-proxy)
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 nohup ./llama_server/llama-server "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
@@ -245,19 +245,48 @@ SERVER_PID=$!
 echo "Llama-server started (PID $SERVER_PID) on port ${SERVER_PORT}"
 echo ""
 
-# 서버가 준비되거나 실패할 때까지 로그 스트리밍
-# --pid: 서버 프로세스가 죽으면 tail도 자동 종료
-tail -f "$LOG_FILE" --pid="$SERVER_PID" | while IFS= read -r line; do
-  echo "$line"
-  if echo "$line" | grep -q "all slots are idle"; then
+# 서버가 준비/실패할 때까지 대기.
+#   특정 로그 문구("all slots are idle")에 의존하면 llama.cpp 버전업 시 깨지므로,
+#   공식 readiness 엔드포인트 /health 폴링으로 견고하게 판단한다.
+#     /health → 준비 200{"status":"ok"} / 로딩 중 503 / 오류 500
+#   추가 안전장치: (1) 서버 프로세스 사망 감지 (2) 로그 치명 오류 패턴 (3) 타임아웃.
+HEALTH_URL="http://127.0.0.1:${SERVER_PORT}/health"
+MAX_WAIT=${SERVER_START_TIMEOUT:-600}   # 초. 큰 모델 로딩 고려(기본 10분). 환경변수로 조정 가능.
+FATAL_RE="symbol lookup error|GGML_ABORT|Killed|[Ss]egmentation fault|core dumped|failed to load model|error loading model|unable to load model"
+READY=0
+WAITED=0
+
+echo "서버 준비 대기 중... (/health 폴링, 최대 ${MAX_WAIT}s)"
+while [ "$WAITED" -lt "$MAX_WAIT" ]; do
+  # (1) 서버 프로세스가 죽었으면 실패
+  if ! kill -0 "$SERVER_PID" 2>/dev/null; then
     echo ""
-    echo "Server ready at http://127.0.0.1:${SERVER_PORT}"
-    break
-  elif echo "$line" | grep -qE "symbol lookup error|GGML_ABORT|Killed|[Ss]egmentation fault|core dumped"; then
-    echo ""
-    echo "Server failed to start. See: $LOG_FILE"
+    echo "Server process exited prematurely. See: $LOG_FILE"
+    tail -n 20 "$LOG_FILE" 2>/dev/null
     break
   fi
+  # (2) /health 200 → 준비 완료
+  if [ "$(curl -s -o /dev/null -w '%{http_code}' "$HEALTH_URL" 2>/dev/null)" = "200" ]; then
+    READY=1
+    break
+  fi
+  # (3) 로그에 치명 오류 패턴 → 즉시 중단
+  if tail -n 60 "$LOG_FILE" 2>/dev/null | grep -qE "$FATAL_RE"; then
+    echo ""
+    echo "Server failed to start. See: $LOG_FILE"
+    tail -n 20 "$LOG_FILE" 2>/dev/null
+    break
+  fi
+  printf '.'
+  sleep 2
+  WAITED=$((WAITED + 2))
 done
+echo ""
 
-pkill -f "tail -f $LOG_FILE" 2>/dev/null || true
+if [ "$READY" -eq 1 ]; then
+  echo "Server ready at http://127.0.0.1:${SERVER_PORT}  (PID $SERVER_PID)"
+elif kill -0 "$SERVER_PID" 2>/dev/null && [ "$WAITED" -ge "$MAX_WAIT" ]; then
+  echo "Timeout(${MAX_WAIT}s): 아직 준비되지 않았지만 서버는 계속 로딩 중일 수 있습니다."
+  echo "  상태 확인: curl $HEALTH_URL   (준비되면 {\"status\":\"ok\"})"
+fi
+
