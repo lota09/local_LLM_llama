@@ -372,37 +372,48 @@ est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$r
 echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 적재 후 예상 여유 VRAM: ${est_available_mb} MB"
 
 # largest_ctx: scale available MB -> tokens (with Q4 KV cache = ~16 tokens/MB)
-# [FIX] KV 캐시 타입을 백엔드에 따라 고른다. 이건 단순 취향이 아니라 실측 근거가 있다.
+# [FIX] KV 캐시 타입 기본값은 q8_0. 취향이 아니라 실측 근거가 있다.
 #
-# MI50/gfx906 + Vulkan(RADV) 에서 35B-A3B Q4_K_M, 채운 토큰 175개 고정 측정:
-#     ctx 16384, -ctk/-ctv q4_0  → 69.9 t/s
-#     ctx 20480, -ctk/-ctv q4_0  →  8.9 t/s   ← 여기서 무너짐
-#     ctx 24576, -ctk/-ctv q4_0  →  8.9 t/s
-#     ctx 32768, -ctk/-ctv q4_0  →  8.9 t/s
-#     ctx 32768, -ctk/-ctv f16   → 71.3 t/s   ← 같은 컨텍스트인데 KV 타입만 바꾸면 정상
-#     ctx 65536, -ctk/-ctv f16   → 70.7 t/s
-# 즉 "컨텍스트가 커서" 느린 게 아니라 "Vulkan + 양자화 KV" 조합이 특정 크기 이상에서
-# 느린 경로를 타는 것이다. (20480/24576/32768 이 소수점까지 같은 8.9 인 점에서
-#  KV 크기에 비례하는 연산이 아니라 고정 비용의 폴백임을 알 수 있다.)
-# 같은 조건에서 ROCm/HIP 는 q4_0 로도 전 구간 평탄하다(59~60 t/s).
+# MI50/gfx906, 35B-A3B Q4_K_M, -fa on, 채운 토큰 175개 고정, 클럭 high:
 #
-# 그래서 Vulkan 이면 f16 KV 를 쓴다. VRAM 을 약 3.6배 더 쓰지만 절벽을 피하고
-# 양자화 손실도 없다. HIP/CUDA 등은 q4_0 로 VRAM 을 아끼는 편이 낫다.
-if [[ "${CHOSEN_DEVICE}" == Vulkan* ]]; then
-  KV_TYPE=${KV_TYPE:-f16}
-else
-  KV_TYPE=${KV_TYPE:-q4_0}
-fi
+#   KV 타입 | ctx 16384 | ctx 20480 | ctx 32768 | ctx 65536 | ctx 131072
+#   --------|-----------|-----------|-----------|-----------|------------
+#   q4_0    |   69.9    |    8.9 ⚠  |    8.9 ⚠  |     -     |     -        (Vulkan)
+#   f16     |     -     |     -     |   71.3    |   70.7    |     -        (Vulkan)
+#   q8_0    |     -     |     -     |   70.0    |   70.0    |     -        (Vulkan)
+#   q8_0    |     -     |     -     |   58.6    |     -     |   58.4       (ROCm/HIP)
+#
+# 관찰 1: Vulkan + q4_0 은 컨텍스트 20480 부터 무너진다. 세 값(20480/24576/32768)이
+#         소수점까지 같은 8.9 인 것으로 보아 KV 크기에 비례하는 연산이 아니라
+#         고정 비용의 느린 경로다. q8_0/f16 은 이 현상이 없다.
+# 관찰 2: q8_0 은 f16 과 속도 차이가 사실상 없으면서 VRAM 은 절반만 쓴다.
+#         (토큰당 K+V: f16 2.0B/원소, q8_0 1.0625B/원소, q4_0 0.5625B/원소)
+# 관찰 3: HIP 는 q4_0 로도 평탄하지만, q8_0 이어도 성능 손해가 없다.
+#
+# 결론: q8_0 을 양쪽 백엔드 공통 기본값으로 쓴다.
+#   - Vulkan 의 q4_0 절벽을 피한다
+#   - f16 대비 VRAM 절반 → 더 긴 컨텍스트를 담을 수 있다
+#     (이 저장소의 35B 모델 기준 여유 VRAM 11.5GB 에서 f16 은 140K 토큰이 한계지만
+#      q8_0 은 264K 로 모델의 학습 컨텍스트 262K 를 전부 담는다)
+#   - q4_0 대비 양자화 손실이 작다
+# 다른 값이 필요하면 KV_TYPE 환경변수로 바꾼다 (예: KV_TYPE=f16 ./run_llama_server.sh).
+KV_TYPE=${KV_TYPE:-q8_0}
 echo "KV 캐시 타입: ${KV_TYPE}  (백엔드=${CHOSEN_DEVICE:-CPU}, KV_TYPE 환경변수로 변경 가능)"
 
-# 토큰당 KV 바이트가 타입에 따라 다르므로 컨텍스트 추정 계수도 함께 바꾼다.
-#   q4_0 ≈ 0.5625 B/원소 → 경험적으로 약 16 tokens/MB
-#   f16  = 2 B/원소      → 그 약 3.56분의 1 ≈ 4.5 tokens/MB
-if [ "$KV_TYPE" = "f16" ] || [ "$KV_TYPE" = "bf16" ]; then
-  tokens_per_mb=4.5
-else
-  tokens_per_mb=16
+if [[ "${CHOSEN_DEVICE}" == Vulkan* ]] && [[ "$KV_TYPE" == q4_* || "$KV_TYPE" == q5_* || "$KV_TYPE" == iq4_* ]]; then
+  echo "⚠️  Vulkan 백엔드 + ${KV_TYPE} 조합은 컨텍스트 20480 이상에서 생성 속도가"
+  echo "    8.9 t/s 수준으로 붕괴하는 것이 실측되었습니다 (q8_0 은 70 t/s)."
 fi
+
+# 토큰당 KV 바이트가 타입에 따라 다르므로 컨텍스트 추정 계수도 함께 바꾼다.
+#   q4_0 ≈ 0.5625 B/원소 → 경험적으로 약 16 tokens/MB 기준
+#   q8_0 ≈ 1.0625 B/원소 → 약 8.5 tokens/MB
+#   f16  = 2.0    B/원소 → 약 4.5 tokens/MB
+case "$KV_TYPE" in
+  f16|bf16|f32) tokens_per_mb=4.5 ;;
+  q8_0)         tokens_per_mb=8.5 ;;
+  *)            tokens_per_mb=16  ;;
+esac
 largest_ctx=$(awk -v a="$est_available_mb" -v t="$tokens_per_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*t); if(d<1024) d=1024; print d }')
 
 # 자동 계산값 상한. 위에서 Vulkan 이면 KV 를 f16 으로 바꿔 성능 절벽 자체를 피했으므로
