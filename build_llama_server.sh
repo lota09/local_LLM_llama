@@ -205,14 +205,67 @@ if [ "$USE_METAL" -eq 0 ]; then
 fi
 
 # --- 3c. CUDA가 없으면 AMD ROCm/HIP 탐색 (Linux) ---
-if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ]; then
-  HIPCC_BIN=""
-  for c in /opt/rocm/bin/hipcc "$(command -v hipcc 2>/dev/null || true)"; do
-    [ -n "$c" ] && [ -x "$c" ] && HIPCC_BIN="$c" && break
+# [FIX] 예전에는 /opt/rocm/bin/hipcc 존재 여부만 봤는데, 그것만으로는 빌드가 되지 않는다.
+# llama.cpp의 HIP 백엔드는 hipcc 말고도 (1) hipBLAS/rocBLAS의 cmake 패키지와
+# (2) 내 GPU 아키텍처(gfx…)용으로 실제 컴파일된 rocBLAS 커널을 필요로 한다.
+# 게다가 ROCm은 /opt/rocm(최신) 과 /opt/rocm-6.2.0 같은 버전별 디렉터리가 공존할 수 있고,
+# 최신 ROCm이 내 GPU를 이미 지원 종료했다면 최신 쪽으로 빌드해봐야 실패하거나 못 쓴다.
+# (실제 사례: gfx906/MI50 는 ROCm 7.x 에서 rocBLAS 커널이 아예 빠져 있었고,
+#  6.2 패키지 안에는 gfx906 커널이 그대로 들어 있어서 6.2로 빌드해야 했다.)
+#
+# 그래서 여기서는 "hipcc가 있냐"가 아니라 "내 GPU 아키텍처를 실제로 지원하는 ROCm 루트가
+# 어디냐"를 기준으로 고른다: 설치된 ROCm 루트들을 최신순으로 훑으면서
+# rocBLAS 커널 파일에 내 gfx 이름이 들어있는 첫 번째 것을 채택한다.
+ROCM_ROOT=""
+GPU_ARCH=""
+if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$OS_NAME" = "Linux" ]; then
+  # (a) 내 GPU 아키텍처 알아내기 (rocminfo)
+  #     주의: rocminfo 는 /dev/kfd 를 열어야 하므로 render 그룹 권한이 필요하다.
+  #     usermod 로 그룹에 넣었어도 "재로그인 전"에는 현재 셸에 반영되지 않아 실패한다.
+  #     그래서 직접 실행이 실패하면 sg 로 그룹을 적용해 한 번 더 시도한다.
+  for ri in /opt/rocm*/bin/rocminfo "$(command -v rocminfo 2>/dev/null || true)"; do
+    [ -n "$ri" ] && [ -x "$ri" ] || continue
+    GPU_ARCH=$("$ri" 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -n1 || true)
+    if [ -z "$GPU_ARCH" ] && id -nG "$USER" 2>/dev/null | grep -qw render; then
+      GPU_ARCH=$(sg render -c "$ri" 2>/dev/null | grep -oE 'gfx[0-9a-f]+' | head -n1 || true)
+    fi
+    [ -n "$GPU_ARCH" ] && break
   done
-  if [ -n "$HIPCC_BIN" ]; then
+  if [ -n "$GPU_ARCH" ]; then
+    echo "GPU 아키텍처 감지: $GPU_ARCH"
+  else
+    echo "GPU 아키텍처를 감지하지 못했습니다 (rocminfo 실패). 아키텍처 필터 없이 진행합니다."
+  fi
+
+  # (b) ROCm 루트 후보를 버전 내림차순으로 나열 (/opt/rocm 심볼릭 포함)
+  #     -V 정렬로 rocm-6.2.0 < rocm-7.14 처럼 버전 순서를 올바르게 잡는다.
+  ROCM_CANDIDATES=$(ls -d /opt/rocm /opt/rocm-* 2>/dev/null | sort -Vr || true)
+
+  for root in $ROCM_CANDIDATES; do
+    [ -d "$root" ] || continue
+    # HIP 백엔드 빌드에 최소한 필요한 cmake 패키지가 갖춰져 있는지
+    [ -f "$root/lib/cmake/hip/hip-config.cmake" ]         || continue
+    [ -f "$root/lib/cmake/hipblas/hipblas-config.cmake" ] || continue
+    [ -f "$root/lib/cmake/rocblas/rocblas-config.cmake" ] || continue
+    [ -x "$root/llvm/bin/clang++" ]                       || continue
+
+    # 내 GPU용 rocBLAS 커널이 실제로 들어있는지 확인 (아키텍처를 아는 경우에만)
+    if [ -n "$GPU_ARCH" ]; then
+      if ! ls "$root"/lib/rocblas/library/*"$GPU_ARCH"* >/dev/null 2>&1; then
+        echo "  $root: rocBLAS에 $GPU_ARCH 커널 없음 → 건너뜀"
+        continue
+      fi
+    fi
+    ROCM_ROOT="$root"
+    break
+  done
+
+  if [ -n "$ROCM_ROOT" ]; then
     USE_ROCM=1
-    echo "hipcc 발견: $HIPCC_BIN → ROCm(HIP) 백엔드 사용"
+    HIPCC_BIN="$ROCM_ROOT/bin/hipcc"
+    echo "ROCm 루트 채택: $ROCM_ROOT${GPU_ARCH:+ ($GPU_ARCH 커널 확인됨)} → ROCm(HIP) 백엔드 사용"
+  else
+    echo "쓸 만한 ROCm 설치를 찾지 못함 (hipcc만 있고 내 GPU용 rocBLAS 커널이 없는 경우 포함)"
   fi
 fi
 
@@ -415,6 +468,39 @@ if [ "$USE_CUDA" -eq 1 ]; then
 elif [ "$USE_ROCM" -eq 1 ]; then
   echo "ROCm(HIP) 빌드 활성화: -DGGML_HIP=ON"
   CMAKE_ARGS+=(-DGGML_HIP=ON)
+
+  # [FIX] 3c에서 고른 ROCm 루트를 cmake에 "명시적으로" 못박는다.
+  # 안 그러면 cmake가 /opt/rocm(최신, 내 GPU 미지원일 수 있음)이나 배포판이 설치한
+  # 구버전 /usr 헤더를 섞어 잡아서, configure는 통과해도 컴파일에서 깨진다.
+  if [ -n "${ROCM_ROOT:-}" ]; then
+    export HIP_PATH="$ROCM_ROOT"
+    export ROCM_PATH="$ROCM_ROOT"
+    # hipcc 래퍼는 cmake가 HIP 컴파일러로 직접 받아주지 않으므로 실제 clang++를 지정
+    CMAKE_ARGS+=(-DCMAKE_HIP_COMPILER="$ROCM_ROOT/llvm/bin/clang++")
+    CMAKE_ARGS+=(-Dhip_DIR="$ROCM_ROOT/lib/cmake/hip")
+    CMAKE_ARGS+=(-Dhipblas_DIR="$ROCM_ROOT/lib/cmake/hipblas")
+    CMAKE_ARGS+=(-Drocblas_DIR="$ROCM_ROOT/lib/cmake/rocblas")
+    [ -d "$ROCM_ROOT/lib/cmake/hip-lang" ] && CMAKE_ARGS+=(-Dhip-lang_DIR="$ROCM_ROOT/lib/cmake/hip-lang")
+  fi
+
+  # 내 GPU 아키텍처만 컴파일 → 빌드 시간이 크게 줄고, 지원 안 되는 아키텍처에서
+  # 나는 컴파일 오류도 피할 수 있다.
+  if [ -n "${GPU_ARCH:-}" ]; then
+    echo "  타겟 아키텍처 한정: $GPU_ARCH"
+    CMAKE_ARGS+=(-DAMDGPU_TARGETS="$GPU_ARCH")
+    CMAKE_ARGS+=(-DCMAKE_HIP_ARCHITECTURES="$GPU_ARCH")
+  fi
+
+  # 배포판이 설치한 구버전 ROCm 헤더(/usr/include/hip 등)가 남아 있으면 위에서 지정한
+  # ROCm 루트의 헤더보다 먼저 잡혀서 빌드가 깨진다. 자동으로 지우지는 않고 경고만 한다.
+  for stale in /usr/include/hip /usr/include/hipblas /usr/include/rocblas; do
+    if [ -d "$stale" ] && [ -n "${ROCM_ROOT:-}" ] && [ "$ROCM_ROOT" != "/usr" ]; then
+      echo "⚠️  구버전 ROCm 헤더가 남아 있습니다: $stale"
+      echo "    $ROCM_ROOT 의 헤더와 충돌해 빌드가 실패할 수 있습니다."
+      echo "    해결(둘 중 하나): sudo mv $stale ${stale}.disabled"
+      echo "                     또는 해당 dev 패키지 제거(libamdhip64-dev/libhipblas-dev/librocblas-dev)"
+    fi
+  done
 elif [ "$USE_VULKAN" -eq 1 ]; then
   echo "Vulkan 빌드 활성화: -DGGML_VULKAN=ON"
   CMAKE_ARGS+=(-DGGML_VULKAN=ON)
@@ -525,6 +611,33 @@ fi
 
 echo "Cloning (depth=1, ref=$CLONE_REF)..."
 git clone --depth 1 --branch "$CLONE_REF" "$REPO_URL" "$BUILD_DIR"
+
+# ─────────────────────────────────────────────
+# 5b. ROCm 6.2 FP8 타입 불일치 자동 패치
+# ─────────────────────────────────────────────
+# llama.cpp 는 "HIP_VERSION >= 6.2.0 이면 __hip_fp8_e4m3 타입이 있다"고 가정하는데,
+# 실제로 ROCm 6.2 헤더에는 fnuz 변형(__hip_fp8_e4m3_fnuz)만 있고 표준 이름의
+# __hip_fp8_e4m3 는 6.3 부터 추가됐다. 그래서 ROCm 6.2 로 빌드하면
+#   error: unknown type name '__hip_fp8_e4m3'
+# 로 깨진다. (gfx906/MI50 처럼 최신 ROCm이 지원을 끊어 6.2를 써야만 하는 경우 직격탄)
+#
+# 헤더에 실제로 그 타입이 있는지 검사해서, 없을 때만 가드를 6.3 으로 올려 이 블록을
+# 통째로 비활성화한다. FP8 경로는 #ifdef FP8_AVAILABLE 로 감싸져 있어 꺼도 안전하며,
+# 어차피 gfx906 은 FP8 하드웨어 지원이 없다.
+if [ "$USE_ROCM" -eq 1 ] && [ -n "${ROCM_ROOT:-}" ]; then
+  HIP_VENDOR_H="$BUILD_DIR/ggml/src/ggml-cuda/vendors/hip.h"
+  FP8_HDR="$ROCM_ROOT/include/hip/amd_detail/amd_hip_fp8.h"
+  if [ -f "$HIP_VENDOR_H" ] && [ -f "$FP8_HDR" ]; then
+    # 'fnuz' 가 안 붙은 진짜 __hip_fp8_e4m3 정의가 있는지 확인
+    if ! grep -qE '(struct|class)[[:space:]]+__hip_fp8_e4m3[^_a-zA-Z]' "$FP8_HDR"; then
+      section "5b. ROCm FP8 타입 호환 패치"
+      echo "$ROCM_ROOT 헤더에 __hip_fp8_e4m3 (비-fnuz) 타입이 없습니다."
+      echo "  → vendors/hip.h 의 FP8 가드를 6.2 → 6.3 으로 올려 비활성화합니다."
+      sed -i 's/HIP_VERSION >= 60200000/HIP_VERSION >= 60300000/g' "$HIP_VENDOR_H"
+      grep -n "HIP_VERSION >= 603" "$HIP_VENDOR_H" | head -2
+    fi
+  fi
+fi
 
 # ─────────────────────────────────────────────
 # 6. cmake 빌드

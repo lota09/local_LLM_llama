@@ -354,6 +354,32 @@ echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 
 # largest_ctx: scale available MB -> tokens (with Q4 KV cache = ~16 tokens/MB)
 largest_ctx=$(awk -v a="$est_available_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*16); if(d<1024) d=1024; print d }')
 
+# [FIX] VRAM만 보고 계산한 값을 그대로 쓰면 안 된다. VRAM이 큰 카드(예: 32GB MI50)에서는
+# 이 식이 17만 토큰 같은 값을 뱉는데, 두 가지 이유로 해롭다:
+#
+#   1) 모델의 학습 컨텍스트(n_ctx_train, 보통 32768)를 넘는 구간은 어차피 llama.cpp가
+#      슬롯 단위로 잘라내고("exceeds the training context of the model - capping"),
+#      품질도 보장되지 않는다. 즉 넘겨봐야 얻는 게 없다.
+#
+#   2) 더 중요한 실측 문제: Vulkan 백엔드에서는 "할당한" 컨텍스트가 32768 이상이 되면
+#      실제로 채운 토큰이 200개뿐이어도 토큰 생성 속도가 급격히 무너진다.
+#      (MI50/gfx906 + RADV 실측, 35B-A3B Q4_K_M, 채운 컨텍스트 225토큰 고정)
+#          ctx  4096 -> 69.7 t/s      ctx 16384 -> 69.6 t/s
+#          ctx 32768 ->  8.9 t/s (붕괴)   ctx 175126 -> 17.4 t/s
+#      같은 조건에서 ROCm/HIP 백엔드는 ctx 175126에서도 60.0 t/s로 평탄하다.
+#      → 붕괴는 하드웨어가 아니라 Vulkan 백엔드의 큰 KV 할당 처리 특성이다.
+#
+# 그래서 자동 계산값에는 상한을 씌운다. 사용자가 값을 직접 입력하면 그 값은 존중한다
+# (아래 프롬프트). 상한은 MAX_AUTO_CTX 환경변수로 조정 가능.
+max_auto_ctx=${MAX_AUTO_CTX:-32768}
+if [ "$largest_ctx" -gt "$max_auto_ctx" ]; then
+  echo "VRAM 기준 계산값 ${largest_ctx} 토큰 → 상한 ${max_auto_ctx} 으로 제한합니다."
+  echo "  (이유: 모델 학습 컨텍스트를 넘는 구간은 어차피 잘리고, Vulkan 백엔드에서는"
+  echo "   큰 컨텍스트를 '할당'하는 것만으로 생성 속도가 크게 떨어집니다."
+  echo "   더 큰 값이 정말 필요하면 아래에서 직접 입력하거나 MAX_AUTO_CTX 로 조정하세요.)"
+  largest_ctx=$max_auto_ctx
+fi
+
 echo "Calculated largest context length (Optimized Heuristic): ${largest_ctx} tokens"
 echo "You may enter a desired -c value. If you enter an invalid value or press Enter, the script will use -c ${largest_ctx} as fallback."
 read -p "Enter desired context tokens (-c) [largest: ${largest_ctx}]: " user_c
