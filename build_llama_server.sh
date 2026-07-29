@@ -777,8 +777,50 @@ ldd "$FOUND_BIN" 2>/dev/null | grep '=>' | awk '{print $3}' | sort -u | while re
       ;;
   esac
   echo "  -> $(basename "$lib")  (from $lib)"
-  cp -a "$lib" "$INSTALL_DIR/" || true
+  # [FIX] 반드시 -L (심볼릭 링크를 따라가 내용을 복사) 이어야 한다.
+  #
+  # ldd 가 알려주는 경로는 보통 soname 심볼릭 링크다:
+  #     /tmp/llama_build/build/bin/libggml-base.so.0 -> libggml-base.so.0.17.0
+  # 여기서 'cp -a' 를 쓰면 링크 자체가 복사되어 설치 디렉터리에는
+  #     libggml-base.so.0 -> libggml-base.so.0.17.0   (대상 파일 없음!)
+  # 처럼 끊어진 링크만 남는다. 실제 파일(*.so.0.17.0)은 아무도 복사하지 않는다.
+  #
+  # 그런데도 한동안 정상 동작하는 것처럼 보이는데, cmake 가 바이너리에 박아 둔
+  # RUNPATH 가 빌드 디렉터리를 가리키고 있어서 거기서 진짜 파일을 찾아 쓰기 때문이다:
+  #     Library runpath: [/tmp/llama_build/build/bin:/opt/rocm-6.2.0/lib:]
+  # 즉 설치본이 빌드 트리에 몰래 의존한 상태이고, 빌드 디렉터리를 지우거나
+  # /tmp 에 두고 재부팅하면 그때서야 'libggml-base.so.0 => not found' 로 터진다.
+  # (백업 디렉터리도 같은 방식으로 만들어졌으므로 자동 복구까지 함께 실패한다.)
+  #
+  # -L 로 soname 이름의 실제 파일을 심어 두면 설치본이 자립한다.
+  cp -Lf "$lib" "$INSTALL_DIR/" || true
 done
+
+# [FIX] 위와 같은 이유로, 백엔드 라이브러리(libggml-vulkan/hip/cuda 등)는 dlopen 으로
+# 열리므로 ldd 에 잡히지 않는다. 빌드 산출물 디렉터리에서 직접 실체를 복사한다.
+BIN_SRC_DIR="$(dirname "$FOUND_BIN")"
+for lib in "$BIN_SRC_DIR"/libggml-*.so*; do
+  [ -e "$lib" ] || continue
+  base="$(basename "$lib")"
+  # 버전 전체 이름(*.so.0.17.0)은 건너뛰고 soname(*.so.0) 만 실체로 심는다
+  case "$base" in
+    *.so.[0-9]*.[0-9]*) continue ;;
+  esac
+  cp -Lf "$lib" "$INSTALL_DIR/" 2>/dev/null || true
+done
+
+# RUNPATH 가 빌드 트리를 가리킨 채로 남으면 위 문제가 다시 숨는다.
+# patchelf 가 있으면 $ORIGIN(자기 디렉터리) 으로 바꿔 설치본을 완전히 자립시킨다.
+if command -v patchelf >/dev/null 2>&1; then
+  echo "patchelf 로 RUNPATH 를 \$ORIGIN 으로 재설정합니다 (빌드 트리 의존 제거)"
+  for f in "$INSTALL_DIR"/llama-server "$INSTALL_DIR"/*.so*; do
+    [ -f "$f" ] || continue
+    patchelf --set-rpath '$ORIGIN' "$f" 2>/dev/null || true
+  done
+else
+  echo "참고: patchelf 가 없어 RUNPATH 는 그대로 둡니다."
+  echo "      run_llama_server.sh 가 LD_LIBRARY_PATH 를 지정하므로 동작에는 문제 없습니다."
+fi
 
 echo ""
 echo "설치된 바이너리의 최종 의존성 확인 (LD_LIBRARY_PATH=$INSTALL_DIR 기준):"
