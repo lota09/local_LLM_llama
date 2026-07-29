@@ -1,6 +1,7 @@
 models/
-llama_server/
-llama_server_backup_*/
+# 백엔드별 설치 디렉터리 (llama_server, llama_server_rocm, llama_server_vulkan, …)
+# 와 그 백업(llama_server_rocm_backup_<epoch> 등)을 모두 제외한다.
+llama_server*/
 trash/
 logs/
 .caddy/

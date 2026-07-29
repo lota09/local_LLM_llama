@@ -15,6 +15,7 @@ cd "$(dirname "$0")"
 # 사용법: ./run_llama_server.sh [--port PORT]
 # 기본값: 8080  (외부 접근은 setup_secure_server.sh 의 Caddy HTTPS 를 사용)
 SERVER_PORT=8080
+WANT_BACKEND=""
 _argv=("$@")
 _i=0
 while [[ $_i -lt ${#_argv[@]} ]]; do
@@ -26,10 +27,75 @@ while [[ $_i -lt ${#_argv[@]} ]]; do
     --port=*)
       SERVER_PORT="${_argv[$_i]#*=}"
       ;;
+    --backend)
+      _i=$(( _i + 1 ))
+      WANT_BACKEND="${_argv[$_i]}"
+      ;;
+    --backend=*)
+      WANT_BACKEND="${_argv[$_i]#*=}"
+      ;;
   esac
   _i=$(( _i + 1 ))
 done
 echo "llama-server 포트: ${SERVER_PORT}  (변경: ./run_llama_server.sh --port 1234)"
+
+# ─── 설치된 백엔드 탐지 및 선택 ───────────────────────────────────────────────
+# build_llama_server.sh 가 백엔드별로 llama_server_rocm / llama_server_vulkan /
+# llama_server_x86_64 … 처럼 따로 설치하므로, 여기서 어떤 걸 쓸지 고른다.
+# 예전 방식(llama_server 단일 디렉터리)도 그대로 인식해서 호환을 유지한다.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+
+BACKEND_DIRS=(); BACKEND_NAMES=()
+for d in "$SCRIPT_DIR"/llama_server_*; do
+  # *_backup_* 은 백업본이므로 후보에서 제외
+  case "$d" in *_backup_*) continue ;; esac
+  [ -x "$d/llama-server" ] || continue
+  BACKEND_DIRS+=("$d")
+  BACKEND_NAMES+=("${d##*/llama_server_}")
+done
+# 구버전 호환: 이름 없는 llama_server/ 도 후보에 넣는다
+if [ -x "$SCRIPT_DIR/llama_server/llama-server" ]; then
+  BACKEND_DIRS+=("$SCRIPT_DIR/llama_server")
+  BACKEND_NAMES+=("(구버전 llama_server)")
+fi
+
+if [ ${#BACKEND_DIRS[@]} -eq 0 ]; then
+  echo "Error: 설치된 llama-server 를 찾지 못했습니다." >&2
+  echo "  먼저 빌드하세요: bash build_llama_server.sh" >&2
+  exit 1
+fi
+
+SELECTED_DIR=""
+if [ -n "$WANT_BACKEND" ]; then
+  # --backend rocm 처럼 명시된 경우
+  for i in "${!BACKEND_NAMES[@]}"; do
+    [ "${BACKEND_NAMES[$i]}" = "$WANT_BACKEND" ] && SELECTED_DIR="${BACKEND_DIRS[$i]}" && break
+  done
+  if [ -z "$SELECTED_DIR" ]; then
+    echo "Error: --backend $WANT_BACKEND 에 해당하는 설치본이 없습니다." >&2
+    echo "  사용 가능: ${BACKEND_NAMES[*]}" >&2
+    exit 1
+  fi
+elif [ ${#BACKEND_DIRS[@]} -eq 1 ]; then
+  SELECTED_DIR="${BACKEND_DIRS[0]}"
+  echo "백엔드: ${BACKEND_NAMES[0]}  (설치된 것이 하나뿐이라 자동 선택)"
+else
+  echo "설치된 백엔드 ${#BACKEND_DIRS[@]}개:"
+  for i in "${!BACKEND_NAMES[@]}"; do
+    printf "  [%d] %s\n" "$i" "${BACKEND_NAMES[$i]}"
+  done
+  # read 는 EOF(비대화형)에서 즉시 실패하고 _sel 이 비므로 멈추지 않는다.
+  # 굳이 [ -t 0 ] 로 막으면 파이프로 넘긴 선택값까지 무시되어 이 스크립트의
+  # 다른 프롬프트(모델 선택 등)와 동작이 어긋난다.
+  _sel=""
+  read -r -p "사용할 백엔드 번호 [기본값 0: ${BACKEND_NAMES[0]}]: " _sel || true
+  if [[ "$_sel" =~ ^[0-9]+$ ]] && [ "$_sel" -lt "${#BACKEND_DIRS[@]}" ]; then
+    SELECTED_DIR="${BACKEND_DIRS[$_sel]}"
+  else
+    SELECTED_DIR="${BACKEND_DIRS[0]}"
+  fi
+  echo "선택됨: $(basename "$SELECTED_DIR")"
+fi
 
 # 라이브러리 경로 설정
 # build_llama_server.sh 의 9번 섹션이 ldd로 필요한 공유 라이브러리를 전부
@@ -41,13 +107,13 @@ echo "llama-server 포트: ${SERVER_PORT}  (변경: ./run_llama_server.sh --port
 # 전혀 상관없는 명령들까지 "file too short" 에러로 줄줄이 죽어버릴 수 있다. 그래서
 # 변수로만 갖고 있다가, 실제로 llama-server를 실행하는 시점에만 그 프로세스에
 # 한정해서 적용한다(아래 --list-devices 조회, 서버 기동 시 각각 LD_LIBRARY_PATH=... 접두 참고).
-LLAMA_LD_LIBRARY_PATH="$(pwd)/llama_server"
+LLAMA_LD_LIBRARY_PATH="$SELECTED_DIR"
 
 # 기존 프로세스 종료
 pkill -9 -f llama-server || true
 sleep 1
 
-SERVER_BIN="./llama_server/llama-server"
+SERVER_BIN="$SELECTED_DIR/llama-server"
 
 # ─── 라이브러리 사전 점검 + 손상 시 백업에서 자동복구 ─────────────────────────
 # 모델 선택 프롬프트까지 다 진행한 뒤에야 라이브러리 깨진 걸 발견하는 걸 방지하기
@@ -56,7 +122,10 @@ SERVER_BIN="./llama_server/llama-server"
 # 강제 재부팅·안티바이러스 격리 등으로 바이너리/라이브러리가 손상됐을 때 무조건
 # "다시 빌드하세요"(5~10분 이상)로 끝내지 않고, 가장 최근 백업으로부터 복구를 먼저 시도한다.
 _find_latest_llama_server_backup() {
-  ls -d llama_server_backup_*/ 2>/dev/null \
+  # [FIX] 백업도 백엔드별로 나뉜다(llama_server_rocm_backup_<epoch> 등).
+  # 다른 백엔드의 백업으로 복구하면 백엔드가 뒤바뀌므로, 반드시 지금 선택한
+  # 설치 디렉터리에 대응하는 백업만 후보로 삼는다.
+  ls -d "${SELECTED_DIR}"_backup_*/ 2>/dev/null \
     | sed 's#/$##' \
     | awk -F'_' '{print $NF, $0}' \
     | sort -n \
@@ -87,8 +156,8 @@ if ! _check_llama_server_ok; then
   BACKUP_DIR_FOUND=$(_find_latest_llama_server_backup)
   if [ -n "$BACKUP_DIR_FOUND" ] && [ -d "$BACKUP_DIR_FOUND" ]; then
     echo "[자동 복구] 최근 백업 발견: $BACKUP_DIR_FOUND → 복구 시도 중..."
-    mkdir -p ./llama_server
-    cp -a "$BACKUP_DIR_FOUND"/. ./llama_server/ 2>/dev/null || true
+    mkdir -p "$SELECTED_DIR"
+    cp -a "$BACKUP_DIR_FOUND"/. "$SELECTED_DIR"/ 2>/dev/null || true
     if _check_llama_server_ok; then
       echo "  → 복구 성공. 이번 실행은 복구된 바이너리로 계속 진행합니다."
       echo "──────────────────────────────────────────────"

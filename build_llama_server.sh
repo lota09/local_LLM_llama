@@ -14,8 +14,22 @@ set -euo pipefail
 
 REPO_URL=${REPO_URL:-https://github.com/ggerganov/llama.cpp.git}
 BUILD_DIR=${BUILD_DIR:-/tmp/llama_build}
-INSTALL_DIR=${INSTALL_DIR:-$(pwd)/llama_server}
-BACKUP_DIR=${BACKUP_DIR:-$(pwd)/llama_server_backup_$(date +%s)}
+
+# [FIX] 설치 디렉터리를 백엔드별로 분리한다 (llama_server_rocm, llama_server_vulkan, ...).
+#
+# 예전에는 백엔드와 무관하게 항상 'llama_server' 하나에 덮어썼다. 그래서
+#   - Vulkan 으로 빌드했다가 ROCm 으로 다시 빌드하면 앞의 것이 사라져 비교가 불가능했고
+#   - 두 백엔드를 같이 쓰려면 프로젝트 디렉터리 자체를 통째로 복제해야 했으며
+#   - 정리 로직이 조금이라도 어긋나면 서로 다른 백엔드의 .so 가 한 디렉터리에 섞였다
+#     (실제로 libggml-vulkan.so.0 가 HIP 설치본에 남아 있던 사고가 있었다)
+#
+# 이름은 백엔드가 정해진 뒤(3번 섹션) 확정되므로, 여기서는 사용자가 INSTALL_DIR 을
+# 직접 지정했는지만 기억해 둔다. 지정하지 않았다면 나중에 백엔드 태그를 붙여 만든다.
+INSTALL_DIR_EXPLICIT=0
+[ -n "${INSTALL_DIR:-}" ] && INSTALL_DIR_EXPLICIT=1
+
+# 스크립트가 있는 디렉터리를 기준으로 삼는다. 어디서 실행하든 결과 위치가 같아진다.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────
 # 유틸: 섹션 헤더 출력
@@ -44,7 +58,12 @@ fi
 
 echo "Repo     : $REPO_URL (ref: $CLONE_REF)"
 echo "Build dir: $BUILD_DIR"
-echo "Install  : $INSTALL_DIR"
+# INSTALL_DIR 은 백엔드가 정해진 뒤(3d-4)에 확정되므로 여기서는 아직 비어 있을 수 있다.
+if [ "$INSTALL_DIR_EXPLICIT" -eq 1 ]; then
+  echo "Install  : $INSTALL_DIR"
+else
+  echo "Install  : ${SCRIPT_DIR}/llama_server_<백엔드>  (백엔드 확정 후 결정)"
+fi
 
 # ─────────────────────────────────────────────
 # 2. cmake 자동 탐색 (conda 우선 → 시스템)
@@ -275,25 +294,35 @@ fi
 # ROCm이 공식 지원을 끊었거나 설치가 무거운 경우에 가장 이식성 높은 선택지가 된다.
 # 판정 기준: (1) libvulkan 로더 존재 (2) 실제 GPU 디바이스가 최소 1개 열거되는지 vulkaninfo로 확인.
 #   → 헤더/glslc가 없어도 "탐지"는 통과시키고, 부족한 도구는 아래에서 자동 설치를 시도한다.
-USE_VULKAN=0
-if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ]; then
+# [FIX] "Vulkan 을 쓸 수 있는가"(VULKAN_AVAILABLE)와 "Vulkan 을 쓸 것인가"(USE_VULKAN)를
+# 분리한다. 예전에는 둘을 한 덩어리로 묶어 CUDA/ROCm 이 감지되면 Vulkan 탐지 자체를
+# 건너뛰었다. 그래서 3d-3 의 백엔드 선택 목록에 Vulkan 이 아예 나타나지 않았고
+# (ROCm 이 잡힌 기기에서는 GGML_BACKEND=vulkan 을 손으로 줘야만 빌드할 수 있었다),
+# 두 백엔드를 만들어 비교하려는 이 프로젝트의 사용 방식과 어긋났다.
+VULKAN_AVAILABLE=0
+if [ "$OS_NAME" = "Linux" ]; then
   if ldconfig -p 2>/dev/null | grep -q libvulkan.so || [ -f /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || command -v vulkaninfo >/dev/null 2>&1; then
-    VULKAN_GPU_FOUND=0
     if command -v vulkaninfo >/dev/null 2>&1; then
       # PHYSICAL_DEVICE_TYPE_CPU(llvmpipe)만 있는 경우는 실가속이 아니므로 제외
       if vulkaninfo --summary 2>/dev/null | grep -q "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\|PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU"; then
-        VULKAN_GPU_FOUND=1
+        VULKAN_AVAILABLE=1
       fi
     else
       # vulkaninfo가 아직 없으면(패키지 미설치) 로더 존재만으로 일단 후보로 채택.
       # 실제 GPU가 없으면 뒤의 cmake 빌드는 성공해도 런타임에 디바이스가 안 잡힐 뿐이라 안전하다.
-      VULKAN_GPU_FOUND=1
-    fi
-    if [ "$VULKAN_GPU_FOUND" -eq 1 ]; then
-      USE_VULKAN=1
-      echo "Vulkan 로더/디바이스 감지 → Vulkan 백엔드 사용 (CUDA/ROCm 미탐지 시 범용 폴백)"
+      VULKAN_AVAILABLE=1
     fi
   fi
+fi
+
+# 자동 감지: CUDA/ROCm/Metal 이 없을 때만 Vulkan 을 "기본 선택"으로 삼는다.
+# (있으면 그쪽이 보통 더 빠르므로 기본값은 그대로 두고, Vulkan 은 선택지로만 제시한다)
+USE_VULKAN=0
+if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ] && [ "$VULKAN_AVAILABLE" -eq 1 ]; then
+  USE_VULKAN=1
+  echo "Vulkan 로더/디바이스 감지 → Vulkan 백엔드 사용 (CUDA/ROCm 미탐지 시 범용 폴백)"
+elif [ "$VULKAN_AVAILABLE" -eq 1 ]; then
+  echo "Vulkan 도 사용 가능합니다 (선택 목록에 포함됩니다)"
 fi
 
 if [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ] && [ "$USE_METAL" -eq 0 ] && [ "$USE_VULKAN" -eq 0 ]; then
@@ -304,8 +333,56 @@ fi
 #     예: GGML_BACKEND=vulkan bash build_llama_server.sh   (ROCm이 있어도 Vulkan으로 강제)
 #         GGML_BACKEND=cpu    bash build_llama_server.sh   (문제 있는 가속기 우회, 트러블슈팅용)
 FORCE_BACKEND="${GGML_BACKEND:-auto}"
+
+# --- 3d-3. 대화형 백엔드 선택 ---
+# 백엔드를 지정하지 않았고 터미널에서 실행 중이면, 이 기기에서 실제로 빌드 가능한
+# 백엔드를 나열해 고르게 한다. 설치 디렉터리가 백엔드별로 분리되므로
+# (llama_server_rocm / llama_server_vulkan / ...) 여러 개를 만들어 두고
+# run_llama_server.sh 에서 골라 쓸 수 있다.
+# --backend <name> 인자로도 지정 가능하며, 비대화형(파이프/CI)에서는 자동 감지를 따른다.
+# read 는 EOF 에서 실패해 기본값(자동 감지 결과)으로 떨어지므로 [ -t 0 ] 가드가 없어도
+# 비대화형에서 멈추지 않는다. 오히려 가드를 두면 파이프로 넘긴 선택값이 무시되어
+# run_llama_server.sh 및 이 스크립트의 다른 프롬프트와 동작이 어긋난다.
+if [ "$FORCE_BACKEND" = "auto" ] && [ "${NONINTERACTIVE:-0}" != "1" ]; then
+  AVAIL_TAGS=(); AVAIL_DESC=()
+  [ "$USE_CUDA"   -eq 1 ] && { AVAIL_TAGS+=("cuda");   AVAIL_DESC+=("CUDA (NVIDIA)"); }
+  [ "$USE_ROCM"   -eq 1 ] && { AVAIL_TAGS+=("rocm");   AVAIL_DESC+=("ROCm/HIP (AMD)"); }
+  [ "$USE_VULKAN" -eq 1 ] && { AVAIL_TAGS+=("vulkan"); AVAIL_DESC+=("Vulkan (벤더 무관)"); }
+  [ "$USE_METAL"  -eq 1 ] && { AVAIL_TAGS+=("metal");  AVAIL_DESC+=("Metal (Apple)"); }
+
+  # 자동 감지가 고른 것 외에 다른 선택지도 제시한다.
+  # (예: ROCm 이 감지돼도 Vulkan 으로 빌드해 두고 비교하고 싶을 수 있다)
+  # [FIX] 예전에는 -n "${VULKAN_AVAILABLE:-}" 로 검사했는데 그 변수가 어디에도 정의되지
+  # 않아 조건이 항상 거짓이었고, 결국 Vulkan 이 목록에 절대 나타나지 않았다.
+  # 이제 3d 에서 VULKAN_AVAILABLE 을 실제로 계산하므로 값으로 비교한다.
+  if [ "$USE_VULKAN" -eq 0 ] && [ "${VULKAN_AVAILABLE:-0}" -eq 1 ]; then
+    AVAIL_TAGS+=("vulkan"); AVAIL_DESC+=("Vulkan (벤더 무관)")
+  fi
+  AVAIL_TAGS+=("cpu"); AVAIL_DESC+=("CPU 전용 (가속 없음)")
+
+  if [ ${#AVAIL_TAGS[@]} -gt 1 ]; then
+    echo ""
+    echo "빌드할 백엔드를 선택하세요 (설치 위치: ${SCRIPT_DIR}/llama_server_<백엔드>):"
+    for i in "${!AVAIL_TAGS[@]}"; do
+      mark=""
+      [ "$i" -eq 0 ] && mark="  ← 자동 감지 결과"
+      existing=""
+      [ -d "${SCRIPT_DIR}/llama_server_${AVAIL_TAGS[$i]}" ] && existing="  [이미 설치됨 — 덮어씀]"
+      printf "  [%d] %-22s %s%s\n" "$i" "${AVAIL_DESC[$i]}" "$mark" "$existing"
+    done
+    _bsel=""
+    read -r -p "번호 선택 [기본값 0: ${AVAIL_DESC[0]}]: " _bsel || true
+    if [[ "$_bsel" =~ ^[0-9]+$ ]] && [ "$_bsel" -lt "${#AVAIL_TAGS[@]}" ]; then
+      FORCE_BACKEND="${AVAIL_TAGS[$_bsel]}"
+    else
+      FORCE_BACKEND="${AVAIL_TAGS[0]}"
+    fi
+    echo "선택됨: $FORCE_BACKEND"
+  fi
+fi
+
 if [ "$FORCE_BACKEND" != "auto" ]; then
-  echo "GGML_BACKEND=$FORCE_BACKEND 지정됨 → 자동 감지 결과를 무시하고 강제 적용"
+  echo "빌드 백엔드: $FORCE_BACKEND (자동 감지 결과보다 우선 적용)"
   USE_CUDA=0; USE_ROCM=0; USE_METAL=0; USE_VULKAN=0
   case "$FORCE_BACKEND" in
     cuda)   [ -z "$NVCC_BIN" ] && { echo "Error: nvcc를 찾을 수 없어 GGML_BACKEND=cuda 강제 적용 불가" >&2; exit 1; }; USE_CUDA=1 ;;
@@ -316,6 +393,22 @@ if [ "$FORCE_BACKEND" != "auto" ]; then
     *) echo "Error: 알 수 없는 GGML_BACKEND=$FORCE_BACKEND (cuda|hip|vulkan|metal|cpu 중 하나)" >&2; exit 1 ;;
   esac
 fi
+
+# --- 3d-4. 백엔드가 확정됐으므로 설치 디렉터리 이름을 정한다 ---
+# GPU 백엔드는 백엔드 이름으로, CPU 전용은 아키텍처로 구분한다
+# (CPU 빌드는 -march=native 등 아키텍처 의존 최적화가 들어가므로 x86_64/aarch64 구분이 의미 있다).
+if   [ "$USE_CUDA"   -eq 1 ]; then BACKEND_TAG="cuda"
+elif [ "$USE_ROCM"   -eq 1 ]; then BACKEND_TAG="rocm"
+elif [ "$USE_VULKAN" -eq 1 ]; then BACKEND_TAG="vulkan"
+elif [ "$USE_METAL"  -eq 1 ]; then BACKEND_TAG="metal"
+else                               BACKEND_TAG="$ARCH_NAME"   # 예: x86_64, aarch64
+fi
+
+if [ "$INSTALL_DIR_EXPLICIT" -eq 0 ]; then
+  INSTALL_DIR="${SCRIPT_DIR}/llama_server_${BACKEND_TAG}"
+fi
+BACKUP_DIR=${BACKUP_DIR:-${INSTALL_DIR}_backup_$(date +%s)}
+echo "설치 위치: $INSTALL_DIR"
 
 # ─────────────────────────────────────────────
 # 3e. Vulkan 빌드 의존성 자동 설치 (libvulkan-dev, glslc, spirv-headers)
@@ -820,6 +913,24 @@ if command -v patchelf >/dev/null 2>&1; then
 else
   echo "참고: patchelf 가 없어 RUNPATH 는 그대로 둡니다."
   echo "      run_llama_server.sh 가 LD_LIBRARY_PATH 를 지정하므로 동작에는 문제 없습니다."
+fi
+
+# [FIX] rocBLAS 는 .so 만으로 동작하지 않는다 — GPU 아키텍처별 커널 데이터(Tensile)를
+# 런타임에 파일로 읽는다. 그리고 그 경로를 librocblas.so 자기 위치 기준으로 찾는다.
+# 그래서 librocblas.so 만 설치 디렉터리로 복사하면 데이터를 못 찾고 이렇게 죽는다:
+#
+#   rocBLAS error: Cannot read <INSTALL_DIR>/rocblas/library/TensileLibrary.dat:
+#                  No such file or directory for GPU arch : gfx906
+#   rocBLAS error: Could not initialize Tensile host
+#
+# 모델 로드까지는 멀쩡히 끝나고 첫 추론 요청에서야 터지기 때문에 원인을 찾기 어렵다.
+# (프롬프트 처리가 시작조차 안 되는 것처럼 보인다.)
+#
+# 데이터 전체는 3.5GB(모든 아키텍처)라 복사하면 낭비다. ROCm 은 어차피 시스템에
+# 설치되어 있어야 HIP 빌드가 돌아가므로, 원본 디렉터리로 심볼릭 링크만 걸어 준다.
+if [ "$USE_ROCM" -eq 1 ] && [ -n "${ROCM_ROOT:-}" ] && [ -d "$ROCM_ROOT/lib/rocblas" ]; then
+  ln -sfn "$ROCM_ROOT/lib/rocblas" "$INSTALL_DIR/rocblas"
+  echo "rocBLAS 커널 데이터 연결: $INSTALL_DIR/rocblas -> $ROCM_ROOT/lib/rocblas"
 fi
 
 echo ""
