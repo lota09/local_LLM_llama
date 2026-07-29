@@ -96,16 +96,35 @@ for v in $CANDIDATES; do
 
   FN=$(echo "$PKGLIST" | awk '/^Package: rocblas$/{f=1} f&&/^Filename: /{print $2; exit}')
   if [ -z "$FN" ]; then echo "rocblas 없음"; continue; fi
-  echo -n "rocblas 확인 중… "
-  if ! curl -fsSL -o "$WORK/r.deb" "$BASE/$FN" 2>/dev/null; then echo "다운로드 실패"; continue; fi
-  # 커널 파일 목록만 확인 (전체 전개는 느리므로 파일명만 훑는다)
-  if dpkg-deb -c "$WORK/r.deb" 2>/dev/null | grep -q "$GPU_ARCH"; then
-    N=$(dpkg-deb -c "$WORK/r.deb" 2>/dev/null | grep -c "$GPU_ARCH")
+  # 기대 크기를 미리 읽어 둔다. rocblas 는 140MB 급이라 중간에 끊기기 쉬운데,
+  # 잘린 파일을 그대로 검사하면 dpkg-deb 가 실패하고 그게 "커널 없음"으로 오인되어
+  # 멀쩡한 버전을 건너뛰게 된다. 실제로 그 오판이 발생해 이 검증을 추가했다.
+  WANT=$(echo "$PKGLIST" | awk -v fn="$FN" '$0=="Filename: "fn{f=1} f&&/^Size: /{print $2; exit}')
+  echo -n "rocblas $(( ${WANT:-0} / 1024 / 1024 ))MB 확인 중… "
+
+  if ! curl -fsSL --connect-timeout 15 --max-time 900 --retry 2 \
+        -o "$WORK/r.deb" "$BASE/$FN" 2>/dev/null; then
+    echo "다운로드 실패 → 건너뜀 (네트워크 문제일 수 있음)"
+    rm -f "$WORK/r.deb"; continue
+  fi
+  GOT=$(stat -c%s "$WORK/r.deb" 2>/dev/null || echo 0)
+  if [ -n "$WANT" ] && [ "$GOT" != "$WANT" ]; then
+    echo "크기 불일치(${GOT}/${WANT}) → 건너뜀"
+    rm -f "$WORK/r.deb"; continue
+  fi
+
+  # 커널 파일 목록만 확인 (전체 전개는 느리므로 파일명만 훑는다).
+  # dpkg-deb 실패와 "해당 아키텍처 없음" 을 반드시 구분한다.
+  if ! LIST=$(dpkg-deb -c "$WORK/r.deb" 2>/dev/null); then
+    echo "패키지를 읽을 수 없음 → 건너뜀"
+    rm -f "$WORK/r.deb"; continue
+  fi
+  N=$(printf '%s' "$LIST" | grep -c "$GPU_ARCH" || true)
+  if [ "$N" -gt 0 ]; then
     echo "${GPU_ARCH} 커널 ${N}개 → 채택"
     PICKED="$v"; break
-  else
-    echo "${GPU_ARCH} 커널 없음 → 건너뜀"
   fi
+  echo "${GPU_ARCH} 커널 없음 → 건너뜀"
   rm -f "$WORK/r.deb"
 done
 
