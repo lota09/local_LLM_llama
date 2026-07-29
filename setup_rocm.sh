@@ -131,7 +131,11 @@ sudo apt-get update
 section "4. 패키지 설치"
 # llama.cpp HIP 백엔드에 실제로 필요한 최소 집합.
 # (전체 ROCm 메타패키지는 수십 GB 라 불필요하다)
-PKGS="rocblas rocblas-dev hipblas hipblas-dev hip-runtime-amd hip-dev rocm-device-libs rocm-llvm"
+#
+# rocm-smi-lib 는 빌드에 필요하진 않지만 함께 넣는다. 클럭/전력/VRAM 을 확인할
+# 방법이 없으면 "왜 느리지"를 진단할 수 없는데, 이 GPU 는 기본 전력 정책에서
+# 성능이 절반 이하로 떨어지는 특성이 있어 확인 수단이 특히 중요하다.
+PKGS="rocblas rocblas-dev hipblas hipblas-dev hip-runtime-amd hip-dev rocm-device-libs rocm-llvm rocm-smi-lib"
 echo "설치: $PKGS"
 sudo apt-get install -y $PKGS
 
