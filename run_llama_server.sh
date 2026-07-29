@@ -461,13 +461,33 @@ echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 
 #
 # 결론: q8_0 을 양쪽 백엔드 공통 기본값으로 쓴다.
 #   - Vulkan 의 q4_0 절벽을 피한다
-#   - f16 대비 VRAM 절반 → 더 긴 컨텍스트를 담을 수 있다
-#     (이 저장소의 35B 모델 기준 여유 VRAM 11.5GB 에서 f16 은 140K 토큰이 한계지만
-#      q8_0 은 264K 로 모델의 학습 컨텍스트 262K 를 전부 담는다)
+#   - f16 대비 VRAM 절반 → 같은 여유 VRAM 으로 약 2배 긴 컨텍스트를 담는다
+#     (아래 tokens_per_mb 계수 기준: f16 4.5 vs q8_0 8.5 tokens/MB)
 #   - q4_0 대비 양자화 손실이 작다
 # 다른 값이 필요하면 KV_TYPE 환경변수로 바꾼다 (예: KV_TYPE=f16 ./run_llama_server.sh).
 KV_TYPE=${KV_TYPE:-q8_0}
 echo "KV 캐시 타입: ${KV_TYPE}  (백엔드=${CHOSEN_DEVICE:-CPU}, KV_TYPE 환경변수로 변경 가능)"
+
+# [FIX] 슬롯 개수(--parallel)를 명시한다. 지정하지 않으면 llama-server 기본값이 4 인데,
+# Vulkan 백엔드에서는 이것만으로 토큰 생성이 무너진다.
+#
+#   MI50/gfx906 + Vulkan, 35B-A3B Q4_K_M, -fa on -ctk/-ctv q8_0:
+#       ctx 65536, --parallel 4  →  5.49 t/s
+#       ctx 93184, --parallel 4  →  5.49 t/s   ← 컨텍스트를 바꿔도 값이 같다
+#       ctx 93184, --parallel 1  → 55.14 t/s
+#
+# 컨텍스트 크기와 무관하게 정확히 같은 5.49 가 나오는 것으로 보아, 연산량 증가가 아니라
+# 다중 시퀀스(kv_unified) 상황에서 느린 경로로 빠지는 것이다. q4_0 절벽(8.9 고정)과
+# 같은 양상이며, 둘 다 Vulkan 백엔드 한정이다. ROCm/HIP 는 슬롯을 늘려도 무너지지 않는다.
+#
+# 슬롯을 여러 개 두면 동시 요청 처리량이 늘지만, 개인용 서버는 보통 한 번에 한 요청만
+# 처리하므로 1 이 지연시간 면에서 유리하다. 동시 사용자가 여럿이면 PARALLEL 로 올린다.
+N_PARALLEL=${PARALLEL:-1}
+echo "슬롯 수(--parallel): ${N_PARALLEL}  (동시 요청을 여럿 받으려면 PARALLEL=4 등으로 지정)"
+if [[ "${CHOSEN_DEVICE}" == Vulkan* ]] && [ "$N_PARALLEL" -gt 1 ]; then
+  echo "⚠️  Vulkan 백엔드에서 --parallel > 1 은 생성 속도를 10배 가까이 떨어뜨립니다"
+  echo "    (실측: parallel=1 에서 55 t/s → parallel=4 에서 5.5 t/s)."
+fi
 
 if [[ "${CHOSEN_DEVICE}" == Vulkan* ]] && [[ "$KV_TYPE" == q4_* || "$KV_TYPE" == q5_* || "$KV_TYPE" == iq4_* ]]; then
   echo "⚠️  Vulkan 백엔드 + ${KV_TYPE} 조합은 컨텍스트 20480 이상에서 생성 속도가"
@@ -526,7 +546,7 @@ fi
 
 # Flash Attention(-fa) & Q4 KV cache applies
 # --host 127.0.0.1: 로컬 전용 (외부 HTTP 차단 — 외부 접근은 Caddy HTTPS 사용)
-ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
+ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" --parallel "$N_PARALLEL" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 # [FIX] LD_LIBRARY_PATH는 여기, llama-server 프로세스 하나에만 적용한다(전역 export 아님).
