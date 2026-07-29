@@ -112,9 +112,29 @@ fi
 # nvidia-smi/rocm-smi 같은 벤더 전용 도구 대신, 방금 빌드된 llama-server 바이너리
 # 자신에게 "어떤 디바이스가 보이는지" 물어본다(--list-devices). CUDA/ROCm/Vulkan/Metal
 # 무엇으로 빌드됐든 공통 인자 파서라 출력 포맷이 동일해서 백엔드 무관하게 동작한다.
-if [ -e /dev/dri/renderD128 ] && ! id -nG "$USER" 2>/dev/null | grep -qw render; then
-  echo "⚠️  현재 사용자($USER)가 'render' 그룹에 없어 GPU 접근이 거부될 수 있습니다."
-  echo "    해결: sudo usermod -aG render,video $USER   (재로그인 후 적용)"
+# [FIX] 권한 점검은 "등록되어 있는가"와 "지금 이 셸에 반영되어 있는가"를 반드시 구분한다.
+#   id -nG "$USER" → /etc/group 을 조회 (usermod 하면 즉시 반영)
+#   id -nG         → 현재 프로세스의 실제 그룹 (재로그인 전이면 옛날 그대로)
+# 예전 코드는 앞의 것만 봐서, usermod 직후 재로그인을 안 한 상태에서도
+# "render 그룹 소속 확인됨"이라고 알려준 뒤 정작 GPU 인식에 실패했다.
+#
+# 또한 두 디바이스 노드의 권한 방식이 달라서 백엔드별로 증상이 갈린다:
+#   /dev/dri/renderD128 → ACL(+) 이 붙어 로그인 세션 사용자에게 자동 허용 → Vulkan은 재로그인 없이도 동작
+#   /dev/kfd            → ACL 없음, 오직 render 그룹으로만 접근 → ROCm/HIP 는 재로그인 필수
+# 그래서 "Vulkan은 됐는데 HIP로 바꾸니 갑자기 디바이스가 없다"는 상황이 발생한다.
+GROUP_HINT=""
+if [ -e /dev/dri/renderD128 ] || [ -e /dev/kfd ]; then
+  if ! id -nG "$USER" 2>/dev/null | grep -qw render; then
+    GROUP_HINT="사용자($USER)가 'render' 그룹에 등록되어 있지 않습니다.
+    해결: sudo usermod -aG render,video $USER   (실행 후 로그아웃→재로그인)"
+  elif ! id -nG 2>/dev/null | grep -qw render; then
+    GROUP_HINT="'render' 그룹에 등록은 되어 있지만 현재 로그인 세션에 아직 반영되지 않았습니다.
+    해결: 로그아웃 후 다시 로그인 (또는 재부팅)
+    임시 우회: sg render -c \"sg video -c ./run_llama_server.sh\"
+    참고: /dev/kfd 는 ACL이 없어 ROCm/HIP 은 반드시 그룹 반영이 필요합니다.
+          (Vulkan 은 /dev/dri 의 ACL 덕분에 재로그인 없이도 동작하므로 증상이 다릅니다.)"
+  fi
+  [ -n "$GROUP_HINT" ] && echo "⚠️  $GROUP_HINT"
 fi
 
 mapfile -t DEVICE_LINES < <(LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" "$SERVER_BIN" --list-devices 2>/dev/null | grep -E '^[[:space:]]*[A-Za-z0-9_]+:' || true)
@@ -352,31 +372,50 @@ est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$r
 echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 적재 후 예상 여유 VRAM: ${est_available_mb} MB"
 
 # largest_ctx: scale available MB -> tokens (with Q4 KV cache = ~16 tokens/MB)
-largest_ctx=$(awk -v a="$est_available_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*16); if(d<1024) d=1024; print d }')
+# [FIX] KV 캐시 타입을 백엔드에 따라 고른다. 이건 단순 취향이 아니라 실측 근거가 있다.
+#
+# MI50/gfx906 + Vulkan(RADV) 에서 35B-A3B Q4_K_M, 채운 토큰 175개 고정 측정:
+#     ctx 16384, -ctk/-ctv q4_0  → 69.9 t/s
+#     ctx 20480, -ctk/-ctv q4_0  →  8.9 t/s   ← 여기서 무너짐
+#     ctx 24576, -ctk/-ctv q4_0  →  8.9 t/s
+#     ctx 32768, -ctk/-ctv q4_0  →  8.9 t/s
+#     ctx 32768, -ctk/-ctv f16   → 71.3 t/s   ← 같은 컨텍스트인데 KV 타입만 바꾸면 정상
+#     ctx 65536, -ctk/-ctv f16   → 70.7 t/s
+# 즉 "컨텍스트가 커서" 느린 게 아니라 "Vulkan + 양자화 KV" 조합이 특정 크기 이상에서
+# 느린 경로를 타는 것이다. (20480/24576/32768 이 소수점까지 같은 8.9 인 점에서
+#  KV 크기에 비례하는 연산이 아니라 고정 비용의 폴백임을 알 수 있다.)
+# 같은 조건에서 ROCm/HIP 는 q4_0 로도 전 구간 평탄하다(59~60 t/s).
+#
+# 그래서 Vulkan 이면 f16 KV 를 쓴다. VRAM 을 약 3.6배 더 쓰지만 절벽을 피하고
+# 양자화 손실도 없다. HIP/CUDA 등은 q4_0 로 VRAM 을 아끼는 편이 낫다.
+if [[ "${CHOSEN_DEVICE}" == Vulkan* ]]; then
+  KV_TYPE=${KV_TYPE:-f16}
+else
+  KV_TYPE=${KV_TYPE:-q4_0}
+fi
+echo "KV 캐시 타입: ${KV_TYPE}  (백엔드=${CHOSEN_DEVICE:-CPU}, KV_TYPE 환경변수로 변경 가능)"
 
-# [FIX] VRAM만 보고 계산한 값을 그대로 쓰면 안 된다. VRAM이 큰 카드(예: 32GB MI50)에서는
-# 이 식이 17만 토큰 같은 값을 뱉는데, 두 가지 이유로 해롭다:
+# 토큰당 KV 바이트가 타입에 따라 다르므로 컨텍스트 추정 계수도 함께 바꾼다.
+#   q4_0 ≈ 0.5625 B/원소 → 경험적으로 약 16 tokens/MB
+#   f16  = 2 B/원소      → 그 약 3.56분의 1 ≈ 4.5 tokens/MB
+if [ "$KV_TYPE" = "f16" ] || [ "$KV_TYPE" = "bf16" ]; then
+  tokens_per_mb=4.5
+else
+  tokens_per_mb=16
+fi
+largest_ctx=$(awk -v a="$est_available_mb" -v t="$tokens_per_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*t); if(d<1024) d=1024; print d }')
+
+# 자동 계산값 상한. 위에서 Vulkan 이면 KV 를 f16 으로 바꿔 성능 절벽 자체를 피했으므로
+# (f16 은 ctx 32768/65536 에서도 70~71 t/s 로 평탄한 것을 확인) 백엔드별 상한은 두지 않는다.
+# 필요하면 MAX_AUTO_CTX 로 직접 제한할 수 있다. 0 이면 제한 없음.
 #
-#   1) 모델의 학습 컨텍스트(n_ctx_train, 보통 32768)를 넘는 구간은 어차피 llama.cpp가
-#      슬롯 단위로 잘라내고("exceeds the training context of the model - capping"),
-#      품질도 보장되지 않는다. 즉 넘겨봐야 얻는 게 없다.
-#
-#   2) 더 중요한 실측 문제: Vulkan 백엔드에서는 "할당한" 컨텍스트가 32768 이상이 되면
-#      실제로 채운 토큰이 200개뿐이어도 토큰 생성 속도가 급격히 무너진다.
-#      (MI50/gfx906 + RADV 실측, 35B-A3B Q4_K_M, 채운 컨텍스트 225토큰 고정)
-#          ctx  4096 -> 69.7 t/s      ctx 16384 -> 69.6 t/s
-#          ctx 32768 ->  8.9 t/s (붕괴)   ctx 175126 -> 17.4 t/s
-#      같은 조건에서 ROCm/HIP 백엔드는 ctx 175126에서도 60.0 t/s로 평탄하다.
-#      → 붕괴는 하드웨어가 아니라 Vulkan 백엔드의 큰 KV 할당 처리 특성이다.
-#
-# 그래서 자동 계산값에는 상한을 씌운다. 사용자가 값을 직접 입력하면 그 값은 존중한다
-# (아래 프롬프트). 상한은 MAX_AUTO_CTX 환경변수로 조정 가능.
-max_auto_ctx=${MAX_AUTO_CTX:-32768}
-if [ "$largest_ctx" -gt "$max_auto_ctx" ]; then
-  echo "VRAM 기준 계산값 ${largest_ctx} 토큰 → 상한 ${max_auto_ctx} 으로 제한합니다."
-  echo "  (이유: 모델 학습 컨텍스트를 넘는 구간은 어차피 잘리고, Vulkan 백엔드에서는"
-  echo "   큰 컨텍스트를 '할당'하는 것만으로 생성 속도가 크게 떨어집니다."
-  echo "   더 큰 값이 정말 필요하면 아래에서 직접 입력하거나 MAX_AUTO_CTX 로 조정하세요.)"
+# 참고: 예전 주석에 "학습 컨텍스트는 보통 32768이라 넘겨도 잘린다"고 적었던 것은 오류였다.
+# 모델마다 다르고(이 저장소의 35B 모델은 262,144), 실제로 capping 경고도 나지 않았다.
+# 학습 컨텍스트 초과 여부는 llama.cpp 가 로드 시점에 스스로 판단해 경고/조정하므로
+# 여기서 임의로 가정하지 않는다.
+max_auto_ctx=${MAX_AUTO_CTX:-0}
+if [ "$max_auto_ctx" -gt 0 ] && [ "$largest_ctx" -gt "$max_auto_ctx" ]; then
+  echo "VRAM 기준 계산값 ${largest_ctx} 토큰 → MAX_AUTO_CTX 상한 ${max_auto_ctx} 으로 제한합니다."
   largest_ctx=$max_auto_ctx
 fi
 
@@ -407,7 +446,7 @@ fi
 
 # Flash Attention(-fa) & Q4 KV cache applies
 # --host 127.0.0.1: 로컬 전용 (외부 HTTP 차단 — 외부 접근은 Caddy HTTPS 사용)
-ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" -fa on -ctk q4_0 -ctv q4_0 --reasoning on --tools all --ui-mcp-proxy)
+ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 # [FIX] LD_LIBRARY_PATH는 여기, llama-server 프로세스 하나에만 적용한다(전역 export 아님).

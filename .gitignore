@@ -1,5 +1,6 @@
 models/
 llama_server/
+llama_server_backup_*/
 trash/
 logs/
 .caddy/

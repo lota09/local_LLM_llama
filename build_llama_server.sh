@@ -740,7 +740,14 @@ echo "설치 완료: $TARGET_BIN"
 # 예전엔 'libllama*/libggml*' 패턴만 지웠는데, 그러면 예를 들어 libmtmd.so처럼
 # 다른 이름의 구버전 라이브러리가 새 버전과 뒤섞여 남을 수 있었다.
 # 9번 섹션이 ldd로 필요한 걸 전부 다시 채워 넣으므로, 여기서는 안전하게 전부 지운다.
-find "$INSTALL_DIR" -maxdepth 1 -type f \( -name '*.so*' -o -name '*.dylib' \) -delete 2>/dev/null || true
+#
+# [FIX] '-type f' 는 심볼릭 링크를 제외한다. 공유 라이브러리는 보통
+#   libggml-hip.so.0 -> libggml-hip.so.0.17.0
+# 처럼 심볼릭 링크 + 실체 파일 쌍으로 설치되므로, -type f 만 쓰면 링크가 살아남는다.
+# 실제로 Vulkan 빌드에서 HIP 빌드로 갈아탔을 때 libggml-vulkan.so.0 링크가 남아
+# 백엔드가 뒤섞이는 문제가 있었다. -type f 를 빼서 링크도 함께 지운다.
+find "$INSTALL_DIR" -maxdepth 1 \( -type f -o -type l \) \
+  \( -name '*.so*' -o -name '*.dylib' \) -delete 2>/dev/null || true
 
 # ─────────────────────────────────────────────
 # 9. 공유 라이브러리 복사 (ldd 기반 자동 탐지)
