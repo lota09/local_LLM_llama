@@ -216,8 +216,111 @@ if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ]; then
   fi
 fi
 
-if [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ] && [ "$USE_METAL" -eq 0 ]; then
+# --- 3d. CUDA/ROCm 둘 다 없으면 Vulkan 탐색 (Linux) ---
+# Vulkan은 NVIDIA/AMD/Intel 어떤 GPU든 벤더 SDK(CUDA/ROCm) 없이 Mesa(RADV/ANV/Lavapipe)나
+# 벤더 드라이버만으로 동작하는 범용 가속 경로다. 특히 구형 AMD GPU(gfx906/MI50 등)처럼
+# ROCm이 공식 지원을 끊었거나 설치가 무거운 경우에 가장 이식성 높은 선택지가 된다.
+# 판정 기준: (1) libvulkan 로더 존재 (2) 실제 GPU 디바이스가 최소 1개 열거되는지 vulkaninfo로 확인.
+#   → 헤더/glslc가 없어도 "탐지"는 통과시키고, 부족한 도구는 아래에서 자동 설치를 시도한다.
+USE_VULKAN=0
+if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ]; then
+  if ldconfig -p 2>/dev/null | grep -q libvulkan.so || [ -f /usr/lib/x86_64-linux-gnu/libvulkan.so.1 ] || command -v vulkaninfo >/dev/null 2>&1; then
+    VULKAN_GPU_FOUND=0
+    if command -v vulkaninfo >/dev/null 2>&1; then
+      # PHYSICAL_DEVICE_TYPE_CPU(llvmpipe)만 있는 경우는 실가속이 아니므로 제외
+      if vulkaninfo --summary 2>/dev/null | grep -q "PHYSICAL_DEVICE_TYPE_DISCRETE_GPU\|PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU"; then
+        VULKAN_GPU_FOUND=1
+      fi
+    else
+      # vulkaninfo가 아직 없으면(패키지 미설치) 로더 존재만으로 일단 후보로 채택.
+      # 실제 GPU가 없으면 뒤의 cmake 빌드는 성공해도 런타임에 디바이스가 안 잡힐 뿐이라 안전하다.
+      VULKAN_GPU_FOUND=1
+    fi
+    if [ "$VULKAN_GPU_FOUND" -eq 1 ]; then
+      USE_VULKAN=1
+      echo "Vulkan 로더/디바이스 감지 → Vulkan 백엔드 사용 (CUDA/ROCm 미탐지 시 범용 폴백)"
+    fi
+  fi
+fi
+
+if [ "$USE_CUDA" -eq 0 ] && [ "$USE_ROCM" -eq 0 ] && [ "$USE_METAL" -eq 0 ] && [ "$USE_VULKAN" -eq 0 ]; then
   echo "가속기를 찾지 못함 → CPU-only 빌드로 진행"
+fi
+
+# --- 3d-2. 자동 감지 결과를 GGML_BACKEND 환경변수로 강제 override 가능 ---
+#     예: GGML_BACKEND=vulkan bash build_llama_server.sh   (ROCm이 있어도 Vulkan으로 강제)
+#         GGML_BACKEND=cpu    bash build_llama_server.sh   (문제 있는 가속기 우회, 트러블슈팅용)
+FORCE_BACKEND="${GGML_BACKEND:-auto}"
+if [ "$FORCE_BACKEND" != "auto" ]; then
+  echo "GGML_BACKEND=$FORCE_BACKEND 지정됨 → 자동 감지 결과를 무시하고 강제 적용"
+  USE_CUDA=0; USE_ROCM=0; USE_METAL=0; USE_VULKAN=0
+  case "$FORCE_BACKEND" in
+    cuda)   [ -z "$NVCC_BIN" ] && { echo "Error: nvcc를 찾을 수 없어 GGML_BACKEND=cuda 강제 적용 불가" >&2; exit 1; }; USE_CUDA=1 ;;
+    hip|rocm) USE_ROCM=1 ;;
+    vulkan) USE_VULKAN=1 ;;
+    metal)  USE_METAL=1 ;;
+    cpu)    : ;;  # 전부 0으로 CPU-only
+    *) echo "Error: 알 수 없는 GGML_BACKEND=$FORCE_BACKEND (cuda|hip|vulkan|metal|cpu 중 하나)" >&2; exit 1 ;;
+  esac
+fi
+
+# ─────────────────────────────────────────────
+# 3e. Vulkan 빌드 의존성 자동 설치 (libvulkan-dev, glslc, spirv-headers)
+#     cmake 탐색(2번 섹션)과 동일한 우선순위로 처리: 이미 있으면 스킵 → 패키지 매니저로 설치.
+#     glslc(셰이더 컴파일러)는 Ubuntu/Debian에서 별도 패키지로 분리되어 있어
+#     libvulkan-dev/glslang-tools만 깔면 놓치기 쉬우므로 명시적으로 확인한다.
+# ─────────────────────────────────────────────
+if [ "$USE_VULKAN" -eq 1 ]; then
+  section "3e. Vulkan 빌드 의존성 확인"
+
+  NEED_PKGS=()
+  [ -f /usr/include/vulkan/vulkan.h ] || NEED_PKGS+=("vulkan-headers-or-dev")
+  command -v glslc >/dev/null 2>&1 || NEED_PKGS+=("glslc")
+  # SPIRV-Headers는 헤더 전용 패키지라 파일 존재로만 확인 가능한 표준 경로가 없어
+  # cmake find_package 실패 여부로 사실상 판단되지만, 미리 설치 시도는 해둔다.
+
+  if [ ${#NEED_PKGS[@]} -gt 0 ]; then
+    echo "부족한 Vulkan 빌드 도구: ${NEED_PKGS[*]}"
+    if command -v apt-get >/dev/null 2>&1; then
+      echo "apt-get로 설치 중: libvulkan-dev glslang-tools glslc spirv-headers"
+      sudo apt-get update >/dev/null 2>&1 || true
+      sudo apt-get install -y libvulkan-dev glslang-tools glslc spirv-headers 2>&1 \
+        | grep -E "^(Setting|Processing|Unpacking|E:)" || true
+    elif command -v dnf >/dev/null 2>&1; then
+      echo "dnf로 설치 중: vulkan-loader-devel vulkan-headers glslang spirv-headers-devel"
+      sudo dnf install -y vulkan-loader-devel vulkan-headers glslang spirv-headers-devel 2>&1 | tail -5
+    elif command -v pacman >/dev/null 2>&1; then
+      echo "pacman으로 설치 중: vulkan-headers vulkan-icd-loader shaderc spirv-headers"
+      sudo pacman -S --noconfirm vulkan-headers vulkan-icd-loader shaderc spirv-headers 2>&1 | tail -5
+    elif command -v brew >/dev/null 2>&1; then
+      echo "brew로 설치 중: shaderc molten-vk"
+      brew install shaderc molten-vk 2>&1 | tail -5
+    else
+      echo "Warning: 알려진 패키지 매니저가 없어 Vulkan 의존성을 자동 설치하지 못했습니다." >&2
+    fi
+  fi
+
+  if ! command -v glslc >/dev/null 2>&1; then
+    echo "Warning: glslc 를 여전히 찾을 수 없습니다. Vulkan 빌드가 실패하면 CPU-only로 폴백하세요:" >&2
+    echo "  GGML_BACKEND=cpu bash build_llama_server.sh" >&2
+  fi
+fi
+
+# ─────────────────────────────────────────────
+# 3f. GPU 디바이스 노드 접근 권한 확인 (ROCm/HIP, Vulkan 공통)
+#     /dev/kfd(ROCm 컴퓨트), /dev/dri/renderD*(DRM render node)는 보통
+#     root:render 소유라서, 사용자가 render(및 GUI 세션 카드 접근용 video) 그룹에
+#     속해 있지 않으면 빌드는 성공해도 런타임에 "권한 거부"로 GPU를 못 잡는다.
+#     빌드 시점에 미리 알려주면 나중에 원인 모를 실패로 헤매는 걸 방지할 수 있다.
+# ─────────────────────────────────────────────
+if [ "$OS_NAME" = "Linux" ] && { [ "$USE_ROCM" -eq 1 ] || [ "$USE_VULKAN" -eq 1 ]; } && [ -e /dev/dri/renderD128 ]; then
+  section "3f. GPU 디바이스 권한 확인"
+  if ! id -nG "$USER" 2>/dev/null | grep -qw render; then
+    echo "⚠️  현재 사용자($USER)가 'render' 그룹에 없습니다. GPU 디바이스 접근이 거부될 수 있습니다."
+    echo "    해결: sudo usermod -aG render,video $USER   (적용하려면 재로그인 필요)"
+  else
+    echo "render 그룹 소속 확인됨 — GPU 디바이스 접근 가능."
+  fi
 fi
 
 # ─────────────────────────────────────────────
@@ -225,9 +328,10 @@ fi
 # ─────────────────────────────────────────────
 section "4. 빌드 플래그 결정"
 
-# 공통: 항상 Release + 서버 빌드 + C++17
+# 공통: 항상 Release + C++17
+# (구버전 llama.cpp cmake의 -DLLAMA_BUILD_SERVER=ON 은 현재 빌드시스템에서 인식되지
+#  않는 죽은 변수라 제거함 — llama-server는 기본 타겟으로 항상 함께 빌드된다.)
 CMAKE_ARGS+=(-DCMAKE_BUILD_TYPE=Release)
-CMAKE_ARGS+=(-DLLAMA_BUILD_SERVER=ON)
 CMAKE_ARGS+=(-DCMAKE_CXX_STANDARD=17)
 
 # ─────────────────────────────────────────────
@@ -311,6 +415,9 @@ if [ "$USE_CUDA" -eq 1 ]; then
 elif [ "$USE_ROCM" -eq 1 ]; then
   echo "ROCm(HIP) 빌드 활성화: -DGGML_HIP=ON"
   CMAKE_ARGS+=(-DGGML_HIP=ON)
+elif [ "$USE_VULKAN" -eq 1 ]; then
+  echo "Vulkan 빌드 활성화: -DGGML_VULKAN=ON"
+  CMAKE_ARGS+=(-DGGML_VULKAN=ON)
 elif [ "$USE_METAL" -eq 1 ]; then
   echo "Metal 빌드 활성화: -DGGML_METAL=ON"
   CMAKE_ARGS+=(-DGGML_METAL=ON)
@@ -563,13 +670,28 @@ else
 fi
 
 # ─────────────────────────────────────────────
+# 9b. 디스크 동기화 (크래시 대비)
+# ─────────────────────────────────────────────
+# cp로 설치한 바이너리/라이브러리는 이 시점에 "디스크에 실제로 써졌다"는 보장이 없다 —
+# 커널 페이지 캐시에 dirty 상태로만 존재할 수 있고 아직 writeback되지 않았을 수 있다.
+# 이 상태에서 하드 크래시/강제 재부팅(정전, OOM kill, WSL 비정상 종료 등)이 발생하면
+# 방금 설치한 파일이 잘리거나 사라져서 "빌드는 성공했는데 다음 실행에서 라이브러리가
+# 깨져 있다"는 사고가 난다. 여기서 강제로 flush해 두면 이후 크래시가 나더라도 최소한
+# 방금 완성한 빌드 결과물은 안전하게 디스크에 남아있어 매번 재빌드할 필요가 없다.
+# (run_llama_server.sh 쪽의 ldd 헬스체크 + 백업 자동복구와 짝을 이루는 방어선.)
+section "9b. 디스크 동기화 (크래시 대비)"
+sync
+echo "sync 완료 — 설치된 바이너리/라이브러리가 디스크에 확실히 기록되었습니다."
+
+# ─────────────────────────────────────────────
 # 10. 완료
 # ─────────────────────────────────────────────
 # 사용한 백엔드 라벨 계산
-if   [ "$USE_CUDA"  -eq 1 ]; then BACKEND_LABEL="CUDA ($NVCC_BIN)"
-elif [ "$USE_ROCM"  -eq 1 ]; then BACKEND_LABEL="ROCm/HIP"
-elif [ "$USE_METAL" -eq 1 ]; then BACKEND_LABEL="Metal"
-else                              BACKEND_LABEL="CPU-only"
+if   [ "$USE_CUDA"   -eq 1 ]; then BACKEND_LABEL="CUDA ($NVCC_BIN)"
+elif [ "$USE_ROCM"   -eq 1 ]; then BACKEND_LABEL="ROCm/HIP"
+elif [ "$USE_VULKAN" -eq 1 ]; then BACKEND_LABEL="Vulkan"
+elif [ "$USE_METAL"  -eq 1 ]; then BACKEND_LABEL="Metal"
+else                                BACKEND_LABEL="CPU-only"
 fi
 
 echo ""
@@ -580,8 +702,9 @@ echo "  Version : $CLONE_REF"
 echo "  Arch    : $ARCH_NAME"
 echo "  Backend : $BACKEND_LABEL"
 echo ""
-echo " 런타임 시 LD_LIBRARY_PATH 필요:"
-echo "  export LD_LIBRARY_PATH=$INSTALL_DIR:\$LD_LIBRARY_PATH"
+echo " 실행: ./run_llama_server.sh"
+echo "  (라이브러리 경로는 그 스크립트가 llama-server 프로세스 하나에만"
+echo "   한정해서 자동으로 적용합니다 — 전역 export 아님)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 exit 0

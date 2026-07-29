@@ -3,9 +3,8 @@
 간단히: 모델 파일을 `models/`에 넣고 기존 실행 스크립트를 복사하거나 `MODEL_PATH`를 변경한 뒤 `llama-server`를 실행하면 됩니다.
 
 **사전조건**
-- `llama_server/llama-server` 실행 파일과 함께 필요한 라이브러리들이 있어야 합니다.
-- `LD_LIBRARY_PATH`에 사용하는 Python 환경의 라이브러리 경로와 `./llama_server`가 포함되어야 합니다.
-- GPU 사용 시 `CUDA_VISIBLE_DEVICES`를 설정하세요.
+- `llama_server/llama-server` 실행 파일과 필요한 라이브러리가 있어야 합니다 (`bash build_llama_server.sh`로 생성 — CUDA/ROCm/Vulkan/Metal/CPU 백엔드를 자동 감지해 빌드하며, 관련 공유 라이브러리도 `./llama_server/` 안에 자동으로 채워 넣습니다).
+- 새 모델을 가장 간단히 추가하려면 아래 템플릿을 복사하지 말고, 그냥 `run_llama_server.sh models/<이름>/` 아래에 gguf 파일을 넣고 `bash run_llama_server.sh`를 실행하세요. 디렉터리/모델/디바이스 선택을 대화형으로 물어보고, GPU 백엔드·VRAM도 자동 감지합니다.
 
 1) 모델 파일 준비
 - 모델 파일 형식: 일반적으로 `.gguf` 또는 양자화된 `.q4_k_m.gguf` 같은 확장자를 사용합니다.
@@ -21,13 +20,14 @@ ls -lh models/
 2) 실행 스크립트 만들기 또는 기존 스크립트 수정
 - 기존 스크립트(`run_huihui_35b.sh`, `run_claude_distill_35b.sh`, `run_omnicoder_9b.sh`)는 `MODEL_PATH` 변수를 사용합니다. 새 모델에 맞게 이 변수를 변경하거나 새 스크립트를 만드세요.
 
-템플릿 스크립트 (새 파일 `run_my_model.sh`로 저장):
+고정된 모델을 항상 같은 포트로 띄우고 싶다면(예: systemd 서비스, 여러 모델 동시 서빙),
+아래처럼 최소한의 전용 스크립트를 만들 수 있습니다. `run_llama_server.sh`가 하는
+GPU 백엔드/디바이스 자동 감지, LD_LIBRARY_PATH 구성 로직은 재사용하는 게 안전합니다:
 
 ```bash
 #!/bin/bash
 cd "$(dirname "$0")"
-export LD_LIBRARY_PATH=/users/lota7574/miniconda3/envs/llama_env/lib:./llama_server:$LD_LIBRARY_PATH
-export CUDA_VISIBLE_DEVICES=0
+export LD_LIBRARY_PATH="$(pwd)/llama_server:${LD_LIBRARY_PATH:-}"
 
 pkill -9 -f llama-server || true
 sleep 1
@@ -38,7 +38,7 @@ LOG_FILE="my_model.log"
 nohup ./llama_server/llama-server \
   -m "$MODEL_PATH" \
   --port 11436 \
-  --host 0.0.0.0 \
+  --host 127.0.0.1 \
   -ngl 99 \
   -c 8192 \
   --reasoning on \
@@ -51,8 +51,10 @@ echo "Check progress: tail -f $LOG_FILE"
 
 설정 포인트:
 - `-c` : 컨텍스트 길이 (ex. 8192, 16384)
+- `--device Vulkan1` / `--device CUDA0` 등: 여러 GPU 중 특정 디바이스를 지정하고 싶을 때. 확인 방법: `./llama_server/llama-server --list-devices`
 - `--temp`, `--top-p`, `--repeat-penalty` 등 샘플링 파라미터를 모델 특성에 맞게 조정
 - `--reasoning on` 같은 옵션은 모델/빌드에 따라 다르게 동작할 수 있음
+- `--host 127.0.0.1`로 로컬 전용 바인딩 후, 외부 접속은 `setup_secure_server.sh`의 HTTPS 리버스 프록시를 사용하는 걸 권장
 
 3) 실행 및 확인
 
@@ -73,14 +75,14 @@ ps aux | grep llama-server
 - 새 모델을 추가할 때는 `models/`에 파일 복사 → `run_<name>.sh` 템플릿 복사 및 `MODEL_PATH` 수정 → 실행 및 로그 확인.
 
 참고 파일
-- `run_huihui_35b.sh` — 예제: [run_huihui_35b.sh](../run_huihui_35b.sh)
-- `run_claude_distill_35b.sh` — 예제: [run_claude_distill_35b.sh](../run_claude_distill_35b.sh)
-- `run_omnicoder_9b.sh` — 예제: [run_omnicoder_9b.sh](../run_omnicoder_9b.sh)
+- `run_llama_server.sh` — 대화형 실행 스크립트 (모델/디바이스 자동 감지 포함)
+- `build_llama_server.sh` — 빌드 스크립트 (백엔드 자동 감지: CUDA/ROCm/Vulkan/Metal/CPU)
 
 ---
 빠른 체크리스트:
 - 모델 파일을 `models/`에 넣었는가?
-- `LD_LIBRARY_PATH`와 `CUDA_VISIBLE_DEVICES`가 올바른가?
+- `LD_LIBRARY_PATH`가 `./llama_server`를 가리키는가?
+- `--list-devices`로 원하는 GPU가 보이는가?
 - 로그 파일을 확인하며 서버가 정상 기동했는가?
 
 ---
