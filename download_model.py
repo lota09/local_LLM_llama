@@ -1,15 +1,64 @@
 #!/usr/bin/env python3
-"""Download model gguf and optional mmproj into models/<name>/
+"""models/<이름>/ 아래로 GGUF 모델과 (선택) mmproj 를 받는다.
 
-Usage: run and follow prompts. Saves model as <name>.gguf and projection as
-<name>_mmproj*.gguf per rules described in the repo.
+download_model.sh 의 파이썬 판이다. 두 파일은 같은 규칙을 따라야 한다:
+동작이 갈리면 sh 가 기준이다.
+
+예전 파이썬 판이 sh 와 달랐던 점(전부 여기서 맞췄다):
+  - 재시도가 죽어 있었다. except 절 끝의 `break` 가 첫 실패에서 루프를 빠져나가
+    "3회 재시도" 가 한 번도 돌지 않았다. sh 의 [FIX 2] 와 같은 종류의 버그다.
+  - 실패하면 받다 만 파일을 지웠다. 그러면 다음 실행에서 이어받을 수가 없다.
+  - Range 요청을 보내고 서버 응답 코드를 안 봤다. 서버가 206 대신 200(전체)을
+    돌려주면 기존 파일 뒤에 처음부터 다시 붙여서 파일을 조용히 망가뜨린다.
+    → 이어받기는 wget -c / curl -C - 에게 맡긴다. 이미 검증된 구현이다.
+  - HF_TOKEN(gated 저장소), sha256 검증, 모델/프로젝션 동시 다운로드가 없었다.
 """
+import concurrent.futures
+import getpass
+import hashlib
+import json
 import os
+import re
+import shutil
+import subprocess
 import sys
 import time
-import urllib.request
+import urllib.error
 import urllib.parse
-import re
+import urllib.request
+
+SKIP_VERIFY = os.environ.get("SKIP_VERIFY", "0") == "1"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# HF 토큰
+#
+# gated 저장소(Llama, Gemma, FLUX 계열 등)는 토큰이 있어야 받아진다. 예전에는
+# 토큰을 환경변수로만 받았고, 게다가 다운로드 요청에만 붙였다. 그래서 sha256 정답지를
+# 가져오는 HF API 호출이 401 을 받고 빈 문자열을 돌려줬고, 화면에는
+# "sha256 정보 없음 — 검증 생략" 만 떴다. 정작 검증이 가장 필요한 gated 20GB 짜리에서
+# 검증이 조용히 사라지는 셈이다. 이제 API 호출에도 같은 토큰을 붙인다.
+#
+# 출처 우선순위: HF_TOKEN → HUGGING_FACE_HUB_TOKEN → huggingface-cli 로그인 파일
+# ─────────────────────────────────────────────────────────────────────────────
+def _resolve_hf_token():
+    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
+        if os.environ.get(var):
+            return os.environ[var].strip()
+    path = os.path.join(os.environ.get("HF_HOME") or
+                        os.path.expanduser("~/.cache/huggingface"), "token")
+    try:
+        with open(path) as f:
+            return f.read().strip()
+    except OSError:
+        return ""
+
+
+HF_TOKEN = _resolve_hf_token()
+
+
+def _auth_header():
+    return {"Authorization": f"Bearer {HF_TOKEN}"} if HF_TOKEN else {}
 
 
 def prompt(msg):
@@ -19,125 +68,349 @@ def prompt(msg):
         return ""
 
 
+# ─────────────────────────────────────────────────────────────────────────────
+# 다운로드 — 이어받기는 wget -c / curl -C - 가 한다.
+# wget -c 는 Content-Range 를 확인하고 이어받으며, HF 의 302 → 서명 CDN 리다이렉트
+# 너머로도 정상 동작하는 것을 실측 확인했다(206 Partial Content + sha256 일치).
+# ─────────────────────────────────────────────────────────────────────────────
+def _downloader_cmd(url, dest):
+    """(cmd, 도구이름) 또는 (None, None)."""
+    if shutil.which("wget"):
+        cmd = ["wget", "-q", "--show-progress"]
+        # 터미널이 아니면 '--show-progress' 는 점(dot) 모드로 떨어져 235MB 파일 하나에
+        # stderr 274KB 를 쏟는다(dot:giga 는 같은 파일에 311바이트). 로그가 망가진다.
+        if not sys.stderr.isatty():
+            cmd.append("--progress=dot:giga")
+        if HF_TOKEN:
+            cmd.append(f"--header=Authorization: Bearer {HF_TOKEN}")
+        return cmd + ["-c", "-O", dest, url], "wget"
+    if shutil.which("curl"):
+        cmd = ["curl", "-L", "--fail", "--progress-bar"]
+        if HF_TOKEN:
+            cmd += ["-H", f"Authorization: Bearer {HF_TOKEN}"]
+        if os.path.exists(dest):
+            cmd += ["-C", "-"]
+        return cmd + ["-o", dest, url], "curl"
+    return None, None
+
+
 def download(url, dest, max_retries=3):
-    print(f"Downloading:\n  {url}\n-> {dest}")
+    print(f"Downloading: {url}\nDestination: {dest}", flush=True)
 
     for attempt in range(1, max_retries + 1):
-        try:
-            # Check if file exists and get its size for resume
-            resume_header = {}
-            if os.path.exists(dest):
-                file_size = os.path.getsize(dest)
-                if file_size > 0:
-                    print(f"  Resume 모드로 재개 중... (시도 {attempt}/{max_retries})")
-                    resume_header = {"Range": f"bytes={file_size}-"}
+        cmd, tool = _downloader_cmd(url, dest)
+        if cmd is None:
+            print("Error: curl or wget is required to download files.", file=sys.stderr)
+            return False
+        if os.path.exists(dest):
+            print(f"Resume 모드로 다운로드 재개 중... (시도 {attempt}/{max_retries})", flush=True)
+        if subprocess.call(cmd) == 0:
+            print("✓ 다운로드 완료", flush=True)
+            return True
 
-            req = urllib.request.Request(
-                url,
-                headers={
-                    "User-Agent": "wget/1.21",
-                    **resume_header
-                }
-            )
-            with urllib.request.urlopen(req) as r:
-                total = r.getheader("Content-Length")
-                total = int(total) if total and total.isdigit() else None
+        # 인증 문제라면 세 번 더 해봐야 세 번 다 실패한다. 즉시 원인을 알려주고 빠져나온다.
+        if not HF_TOKEN and _diagnose_gated(url):
+            return False
 
-                # Resume mode: add existing file size
-                if resume_header and os.path.exists(dest):
-                    existing_size = os.path.getsize(dest)
-                    if total:
-                        total += existing_size
-                    mode = "ab"  # append binary
-                else:
-                    mode = "wb"  # write binary
+        if attempt < max_retries:
+            wait_time = attempt * 10
+            print(f"⚠ 다운로드 실패. {wait_time}초 후 재시도...", flush=True)
+            time.sleep(wait_time)
 
-                with open(dest, mode) as f:
-                    downloaded = os.path.getsize(dest) if os.path.exists(dest) else 0
-                    chunk_size = 64 * 1024
-                    while True:
-                        chunk = r.read(chunk_size)
-                        if not chunk:
-                            break
-                        f.write(chunk)
-                        downloaded += len(chunk)
-                        if total:
-                            pct = downloaded * 100 / total
-                            print(f"  {downloaded}/{total} bytes ({pct:.1f}%)", end="\r")
-            if total:
-                print()
-            print("✓ 다운로드 완료")
-            return
-        except Exception as e:
-            print(f"\n⚠ 다운로드 실패: {e}")
-            if attempt < max_retries:
-                wait_time = attempt * 10
-                print(f"  {wait_time}초 후 재시도...")
-                import time
-                time.sleep(wait_time)
-            else:
-                print("✗ 최대 시도 횟수 초과")
-                if os.path.exists(dest):
-                    os.remove(dest)
-                sys.exit(1)
-            break
+    print("Error: 다운로드 최대 시도 횟수 초과", file=sys.stderr)
+    # 여기서 파일을 지우지 않는다. 부분 파일이 남아 있어야 다음 실행에서 이어받을 수 있고,
+    # 아래 sha256 검증이 "받다 만 것"인지 "깨진 것"인지 구분해 준다.
+    return False
 
 
-def safe_filename_from_proj_url(basename, name):
-    # try to capture mmproj plus optional suffix (e.g. mmproj-F16)
-    m = re.search(r"(mmproj(?:-[^.]*)?)", basename, flags=re.IGNORECASE)
-    if m:
-        tag = m.group(1)
-        # preserve case from match
-        return f"{name}_{tag}.gguf"
-    # fallback
-    return f"{name}_mmproj.gguf"
+def _is_gated(url):
+    """gated 저장소 판별 (요청 1회). 조용히 참/거짓만 돌려준다."""
+    try:
+        req = urllib.request.Request(url, method="HEAD",
+                                     headers={"User-Agent": "wget/1.21",
+                                              **_auth_header()})
+        urllib.request.urlopen(req, timeout=15)
+        return False
+    except urllib.error.HTTPError as e:
+        return e.code in (401, 403)
+    except Exception:
+        return False
+
+
+def _diagnose_gated(url):
+    if not _is_gated(url):
+        return False
+    print("", file=sys.stderr)
+    print("⛔ 이 저장소는 로그인/약관 동의가 필요한 gated 저장소입니다.", file=sys.stderr)
+    print("   HF 웹에서 해당 모델의 약관에 동의한 뒤 토큰을 주고 재실행하세요:", file=sys.stderr)
+    print("     HF_TOKEN=hf_xxx python3 download_model.py", file=sys.stderr)
+    return True
+
+
+def ensure_token(model_url):
+    """gated 여부는 20GB 를 태우고 나서가 아니라 시작 전에 알아야 한다.
+
+    다운로드는 스레드로 도는데 거기서 토큰을 물어볼 수는 없다(입력이 섞인다).
+    그래서 아직 프롬프트가 안전한 이 지점에서 한 번 확인한다. 요청 1회.
+    """
+    global HF_TOKEN
+    if HF_TOKEN or not _is_gated(model_url):
+        return
+    print("")
+    print("⛔ 이 저장소는 로그인/약관 동의가 필요한 gated 저장소입니다.")
+    print("   먼저 HF 웹에서 해당 모델의 약관에 동의했는지 확인하세요.")
+    print("   토큰: https://huggingface.co/settings/tokens (read 권한이면 충분)")
+    tok = getpass.getpass("HF 토큰을 붙여넣으세요 (그냥 Enter 면 중단): ").strip()
+    if not tok:
+        print("토큰 없이는 이 저장소를 받을 수 없습니다.", file=sys.stderr)
+        sys.exit(1)
+    HF_TOKEN = tok
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 무결성 검증
+#
+# HuggingFace API 의 lfs.oid 는 파일 내용의 sha256 이다. 즉 정답지를 서버가 준다.
+# 이걸 안 쓰면 20GB 짜리 GGUF 가 조용히 잘려도 그 자리에서는 알 수 없고,
+# 나중에 llama-server 가 'invalid magic' 이나 알 수 없는 로드 실패로만 알려준다.
+# ─────────────────────────────────────────────────────────────────────────────
+def hf_sha_for_url(url):
+    """https://huggingface.co/<repo>/resolve/<rev>/<path> → 그 파일의 sha256.
+
+    HF URL 이 아니면 빈 문자열. 그러면 검증은 그냥 생략된다.
+    """
+    url = url.split("?", 1)[0]
+    prefix = "https://huggingface.co/"
+    if not url.startswith(prefix) or "/resolve/" not in url:
+        return ""
+    rest = url[len(prefix):]
+    repo, tail = rest.split("/resolve/", 1)
+    rev, _, path = tail.partition("/")
+    api = f"https://huggingface.co/api/models/{repo}/tree/{rev}?recursive=true"
+    try:
+        # gated 저장소의 트리 API 도 토큰을 요구한다. 안 붙이면 401 → 검증 생략.
+        req = urllib.request.Request(api, headers=_auth_header())
+        with urllib.request.urlopen(req, timeout=30) as r:
+            tree = json.load(r)
+    except Exception:
+        return ""
+    for entry in tree:
+        if entry.get("path") == urllib.parse.unquote(path):
+            return (entry.get("lfs") or {}).get("oid", "") or ""
+    return ""
+
+
+def _sha256(path):
+    # openssl 이 파이썬 hashlib/coreutils sha256sum 보다 빠르다. 같은 12.7GB 파일 실측:
+    #     sha256sum  78.6s (154 MB/s)   ← 이식성 위주의 C 구현
+    #     openssl    29.0s (419 MB/s)   ← 어셈블리(AVX2) 최적화
+    # 이 CPU(Coffee Lake)에는 SHA-NI 확장이 없어서 구현 차이가 그대로 드러난다.
+    if shutil.which("openssl"):
+        print(f"  검증 중 (sha256 via openssl, 약 2.4초/GB): {os.path.basename(path)}", flush=True)
+        out = subprocess.run(["openssl", "dgst", "-sha256", path],
+                             capture_output=True, text=True)
+        if out.returncode == 0:
+            return out.stdout.strip().split()[-1]
+    print(f"  검증 중 (sha256, 약 6.5초/GB): {os.path.basename(path)}", flush=True)
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        for chunk in iter(lambda: f.read(1 << 20), b""):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def verify_sha(path, want):
+    """일치하거나 검증 불가면 True, 불일치면 False."""
+    if not os.path.isfile(path):
+        return False
+    if not want:
+        print("  (sha256 정보 없음 — 검증 생략)")
+        return True
+    if SKIP_VERIFY:
+        print("  (SKIP_VERIFY=1 — 검증 생략)")
+        return True
+    # HF 는 gated 저장소의 해시를 별표로 가린다. 그대로 비교하면 항상 불일치가 된다.
+    if not re.fullmatch(r"[0-9a-fA-F]{64}", want):
+        print("  (HF 가 해시를 가린 저장소 — 검증 생략)")
+        return True
+    got = _sha256(path)
+    if got == want:
+        print(f"  ✓ sha256 일치: {os.path.basename(path)}")
+        return True
+    print(f"  ✗ sha256 불일치: {os.path.basename(path)}", file=sys.stderr)
+    print(f"     기대: {want}", file=sys.stderr)
+    print(f"     실제: {got}", file=sys.stderr)
+    return False
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 이름 짓기
+#
+# 예전에는 디렉터리 이름을 사람이 먼저 타이핑하게 했다. 그 결과 models/ 안에는
+# 양자화 수준이 빠진 디렉터리(Qwen3.6-35B-A3B-Uncensored-HauhauCS-Aggressive)와
+# 제작자가 빠진 디렉터리가 섞여 남았다. 사람이 매번 정확히 옮겨 적을 이유가 없다 —
+# URL 이 그 정보를 이미 다 갖고 있다.
+#
+# 규칙: <제작자>_<파일명 stem>  (stem 안에 제작자가 이미 있으면 중복은 지운다)
+#   https://huggingface.co/HauhauCS/Qwen3.8-...-MTP-GGUF/resolve/main/
+#     Qwen3.8-27B-Uncensored-HauhauCS-Aggressive-Q6_K_P.gguf
+#   →  HauhauCS_Qwen3.8-27B-Uncensored-Aggressive-Q6_K_P
+# ─────────────────────────────────────────────────────────────────────────────
+def url_basename(url):
+    """URL → 파일 이름 (쿼리스트링 ?download=true 제거, %XX 디코드)."""
+    path = urllib.parse.urlparse(url).path
+    return urllib.parse.unquote(os.path.basename(path))
+
+
+def hf_owner_from_url(url):
+    """https://huggingface.co/<owner>/<repo>/... → owner."""
+    p = urllib.parse.urlparse(url)
+    if p.netloc != "huggingface.co":
+        return ""
+    parts = [x for x in p.path.split("/") if x]
+    if parts and parts[0] in ("datasets", "spaces", "models"):
+        parts = parts[1:]
+    return parts[0] if len(parts) >= 2 else ""
+
+
+def sanitize_name(name):
+    """파일 이름으로 쓸 수 없는 문자를 _ 로. 앞뒤 구분자도 정리한다."""
+    return re.sub(r"[^A-Za-z0-9._-]", "_", name).strip("-._")
+
+
+def _strip_token(stem, token):
+    """stem 에서 토큰 하나를 구분자 경계로 제거 (대소문자 무시).
+
+    'HauhauCS' 를 지울 때 'HauhauCSX' 같은 다른 단어를 건드리면 안 되므로 경계를 본다.
+    """
+    if not token:
+        return stem
+    pat = re.compile(r"(^|[-_.])" + re.escape(token) + r"([-_.]|$)", re.IGNORECASE)
+    return pat.sub(r"\1", stem, count=1).strip("-._")
+
+
+def suggest_name(model_url):
+    """모델 URL → 제안할 디렉터리/파일 이름."""
+    stem = re.sub(r"\.gguf$", "", url_basename(model_url), flags=re.IGNORECASE)
+    if not stem:
+        return ""
+    owner = hf_owner_from_url(model_url)
+    if owner:
+        stem = f"{owner}_{_strip_token(stem, owner)}"
+    return sanitize_name(stem)
+
+
+def proj_tag(basename):
+    """프로젝션 파일명에서 정밀도 태그만 뽑는다 (f16, bf16, q8_0 ...).
+
+    보통 이름 끝쪽에 붙으므로 마지막 매치를 쓴다.
+    """
+    low = re.sub(r"\.gguf$", "", basename, flags=re.IGNORECASE).lower()
+    found = re.findall(r"bf16|fp16|f16|fp32|f32|q[0-9]+(?:_[0-9a-z]+)*", low)
+    # 하이픈은 반드시 남긴다. run_llama_server.sh 는 '*mmproj-*.gguf' 로 찾는다.
+    return f"mmproj-{found[-1] if found else 'default'}"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 대화형 입력 — URL 을 먼저 받고, 이름은 거기서 뽑아 제안한다.
+# ─────────────────────────────────────────────────────────────────────────────
+def ask_names(model_url, proj_url):
+    if not url_basename(model_url).lower().endswith(".gguf"):
+        print("⚠ 모델 URL 이 .gguf 로 끝나지 않습니다. 이름이 이상하게 잡힐 수 있습니다.")
+    suggested = suggest_name(model_url)
+    if suggested:
+        print("")
+        print("URL 에서 뽑은 이름:")
+        print(f"  디렉터리  : models/{suggested}/")
+        print(f"  모델 파일 : {suggested}.gguf")
+        if proj_url:
+            print(f"  프로젝션  : {suggested}_{proj_tag(url_basename(proj_url))}.gguf")
+        ans = prompt("이 이름을 쓸까요? (Y/n, 또는 원하는 이름을 직접 입력): ")
+        low = ans.lower()
+        if ans == "" or low in ("y", "yes"):
+            return suggested
+        if low not in ("n", "no"):
+            return sanitize_name(ans.rstrip("/"))
+
+    name = sanitize_name(prompt("Model directory name (will create models/<name>/): ").rstrip("/"))
+    if not name:
+        print("Model directory name is required.", file=sys.stderr)
+        sys.exit(1)
+    return name
+
+
+def confirm_overwrite(path):
+    """덮어쓰기로 답하면 지우고 True. 이 파일을 받지 않기로 하면 False."""
+    if not os.path.exists(path):
+        return True
+    if not (prompt(f"{path} exists. Overwrite? (y/N): ") or "N").lower().startswith("y"):
+        return False
+    os.remove(path)
+    return True
 
 
 def main():
-    print("Create model directory name under models/ (example: gemma-4-26B-A4B-it-Claude-Opus-Distill_v2.q3_k_s)")
-    model_dir_name = prompt("Model directory name: ")
-    if not model_dir_name:
-        print("Model directory name is required.")
-        sys.exit(1)
-    model_dir_name = os.path.basename(model_dir_name.rstrip("/"))
-
     model_url = prompt("Model GGUF URL: ")
     if not model_url:
-        print("Model GGUF URL is required.")
+        print("Model GGUF URL is required.", file=sys.stderr)
         sys.exit(1)
-
     proj_url = prompt("Projection GGUF URL (leave empty if none): ")
 
+    # 디렉터리를 만들기 전에 물어야 중단했을 때 빈 models/<이름>/ 이 남지 않는다.
+    ensure_token(model_url)
+
+    model_dir_name = ask_names(model_url, proj_url)
     target_dir = os.path.join("models", model_dir_name)
     os.makedirs(target_dir, exist_ok=True)
 
     model_dest = os.path.join(target_dir, f"{model_dir_name}.gguf")
-    if os.path.exists(model_dest):
-        over = prompt(f"{model_dest} exists. Overwrite? (y/N): ") or "N"
-        if not over.lower().startswith("y"):
-            print("Aborting (model file exists).")
-            sys.exit(1)
+    if not confirm_overwrite(model_dest):
+        print("Aborting: model file exists.")
+        sys.exit(1)
 
-    download(model_url, model_dest)
-
+    proj_dest = ""
     if proj_url:
-        parsed = urllib.parse.urlparse(proj_url)
-        base = os.path.basename(parsed.path)
-        proj_filename = safe_filename_from_proj_url(base, model_dir_name)
-        proj_dest = os.path.join(target_dir, proj_filename)
-        if os.path.exists(proj_dest):
-            over = prompt(f"{proj_dest} exists. Overwrite? (y/N): ") or "N"
-            if not over.lower().startswith("y"):
-                print("Skipping projection download (file exists).")
-                return
-        download(proj_url, proj_dest)
-    else:
-        print("No projection URL provided; skipping projection download.")
+        proj_dest = os.path.join(
+            target_dir, f"{model_dir_name}_{proj_tag(url_basename(proj_url))}.gguf")
+        if not confirm_overwrite(proj_dest):
+            print("Skipping projection download (file exists).")
+            proj_url, proj_dest = "", ""
 
-    print(f"Saved files under {target_dir}:")
-    for fn in os.listdir(target_dir):
-        print(" - ", fn)
+    # 다운로드를 시작하기 전에 기대 해시를 미리 받아 둔다. 네트워크 호출이 가볍고,
+    # 여기서 받아 두면 백그라운드 잡들과 경쟁하지 않는다.
+    model_sha = hf_sha_for_url(model_url)
+    proj_sha = hf_sha_for_url(proj_url) if proj_url else ""
+    if model_sha:
+        print(f"기대 sha256 (model): {model_sha}")
+    if proj_sha:
+        print(f"기대 sha256 (proj) : {proj_sha}")
+
+    print("Starting downloads...")
+    jobs = [(model_url, model_dest)]
+    if proj_url:
+        jobs.append((proj_url, proj_dest))
+    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+        ok = all(list(pool.map(lambda j: download(*j), jobs)))
+
+    if not ok:
+        print("One or more downloads failed. 다시 실행하면 이어받습니다.", file=sys.stderr)
+        sys.exit(1)
+
+    print("")
+    print("── 무결성 검증 ──")
+    ok = verify_sha(model_dest, model_sha)
+    if proj_dest and not verify_sha(proj_dest, proj_sha):
+        ok = False
+
+    if not ok:
+        print("", file=sys.stderr)
+        print("파일이 손상되었습니다. 다시 실행하면 이어받기를 시도합니다.", file=sys.stderr)
+        print(f"그래도 안 되면 지우고 처음부터 받으세요: rm '{target_dir}'/*.gguf", file=sys.stderr)
+        sys.exit(1)
+
+    print("")
+    print("Downloads complete. Saved to:")
+    subprocess.call(["ls", "-1sh", target_dir])
 
 
 if __name__ == "__main__":
