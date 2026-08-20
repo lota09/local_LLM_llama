@@ -431,16 +431,6 @@ else
   echo "감지된 GPU 여유 VRAM (모델 로드 전 현재값): ${vram_mb} MB"
 fi
 
-# Optimized Heuristic based on empirical VRAM measurements
-# 1. OS VRAM usage is ~10MB. We reserve 300MB as a safe buffer for context spikes.
-reserved_mb=300
-
-# 2. estm=m*1.02 : Actual VRAM usage (5420MB) is less than file size (6033MB).
-# We use 1.02 (2% overhead) instead of 1.2 to reclaim ~1.8GB of VRAM.
-est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$reserved_mb" 'BEGIN{ if(v<=0){print 0; exit} estm=m*1.02; estp=p*1.05; a=v-estm-estp-r; if(a<0) a=0; print a }')
-echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 적재 후 예상 여유 VRAM: ${est_available_mb} MB"
-
-# largest_ctx: scale available MB -> tokens (with Q4 KV cache = ~16 tokens/MB)
 # [FIX] KV 캐시 타입 기본값은 q8_0. 취향이 아니라 실측 근거가 있다.
 #
 # MI50/gfx906, 35B-A3B Q4_K_M, -fa on, 채운 토큰 175개 고정, 클럭 high:
@@ -462,7 +452,7 @@ echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 
 # 결론: q8_0 을 양쪽 백엔드 공통 기본값으로 쓴다.
 #   - Vulkan 의 q4_0 절벽을 피한다
 #   - f16 대비 VRAM 절반 → 같은 여유 VRAM 으로 약 2배 긴 컨텍스트를 담는다
-#     (아래 tokens_per_mb 계수 기준: f16 4.5 vs q8_0 8.5 tokens/MB)
+#     (원소당 2.0B → 1.0625B, 실측한 토큰당 KV 도 정확히 이 비율로 줄어든다)
 #   - q4_0 대비 양자화 손실이 작다
 # 다른 값이 필요하면 KV_TYPE 환경변수로 바꾼다 (예: KV_TYPE=f16 ./run_llama_server.sh).
 KV_TYPE=${KV_TYPE:-q8_0}
@@ -494,16 +484,242 @@ if [[ "${CHOSEN_DEVICE}" == Vulkan* ]] && [[ "$KV_TYPE" == q4_* || "$KV_TYPE" ==
   echo "    8.9 t/s 수준으로 붕괴하는 것이 실측되었습니다 (q8_0 은 70 t/s)."
 fi
 
-# 토큰당 KV 바이트가 타입에 따라 다르므로 컨텍스트 추정 계수도 함께 바꾼다.
-#   q4_0 ≈ 0.5625 B/원소 → 경험적으로 약 16 tokens/MB 기준
-#   q8_0 ≈ 1.0625 B/원소 → 약 8.5 tokens/MB
-#   f16  = 2.0    B/원소 → 약 4.5 tokens/MB
-case "$KV_TYPE" in
-  f16|bf16|f32) tokens_per_mb=4.5 ;;
-  q8_0)         tokens_per_mb=8.5 ;;
-  *)            tokens_per_mb=16  ;;
-esac
-largest_ctx=$(awk -v a="$est_available_mb" -v t="$tokens_per_mb" 'BEGIN{ if(a<=0){print 8192; exit} d=int(a*t); if(d<1024) d=1024; print d }')
+# ─────────────────────────────────────────────────────────────────────────────
+# [FIX 2026-08-21] 컨텍스트 추정: 상수를 버리고 llama.cpp 자신에게 물어본다.
+#
+# 예전 코드는 토큰당 KV 크기를 KV 타입만 보고 상수로 잡았다(q8_0 이면 8.5 tokens/MB).
+# KV 크기는 모델 구조에 달려 있어서 상수 하나로는 맞을 수 없다. 이 저장소의 모델
+# 세 개를 llama.cpp 가 보고하는 값으로 재보면:
+#
+#   모델                          | KV 있는 층  | 토큰당 KV(q8_0) | tokens/MiB
+#   ------------------------------|-------------|-----------------|-----------
+#   Qwen3.8-27B-ABLITERATED       | 64 중 16    |   34,816 B      |   30.1
+#   Qwen3.6-35B-A3B (MoE)         | 40 중 10    |   10,880 B      |   96.4
+#   Gemma4-26B-A4B (MoE)          | 30 중  5    |   10,880 B      |   96.4
+#
+# 상수 8.5 는 첫 모델에서 3.5배, 뒤 둘에서 11배 과대평가였다(= 컨텍스트를 그만큼
+# 손해봤다). 셋 다 하이브리드 구조라 층 전부가 KV 를 갖지 않는다. qwen35 계열은
+# full_attention_interval=4 라 네 층 중 하나만 어텐션이고 나머지는 SSM 상태(RS 버퍼),
+# Gemma4 는 25개 층이 슬라이딩 윈도우라 컨텍스트와 무관하게 1536 셀로 고정된다.
+# 그래서 GGUF 메타데이터에 block_count × head_count_kv × key_length 공식을 그대로
+# 넣는 방법도 4배씩 틀린다. 추측하지 말고 물어봐야 한다.
+#
+# 물어보는 방법은 두 가지고, 정확한 쪽을 먼저 쓴다.
+#
+# [1순위] -fit: llama-server 는 -c 를 주지 않으면 "여유 VRAM 에 맞는 가장 큰
+#   컨텍스트"를 스스로 고른다(--fit on 이 기본값). 이 계산은 **가중치를 올리기 전에**
+#   끝난다(실측 0.57초). 그래서 띄우기 직전에 한 번 물어보고 그 값을 그대로 쓸 수 있다.
+#   백엔드별 연산 버퍼, 호스트에 남는 텐서(임베딩 등), mmproj 몫까지 llama.cpp 가
+#   아는 그대로 반영된다. 사람이 다시 추정할 이유가 없다.
+#
+#   실측(Qwen3.8-27B + mmproj, ROCm0/gfx906, q8_0, parallel 1):
+#     선택 262144 토큰, 예상 30,268 MiB / 여유 32,434 MiB, 2,165 MiB 남김
+#     → 이 스크립트로 실제 기동 후 rocm-smi 31,689 MiB / 32,752 MiB (여유 1,063 MiB),
+#       65,536 토큰 프롬프트 처리 중에도 그대로 유지. 예전 상수는 같은 조건에서
+#       82,304 토큰을 제안했다(3.2배 손해).
+#
+# [2순위] CPU 드라이런 2점 측정: -fit 이 없는 예전 빌드용 폴백.
+#   --device none -ngl 0 --no-repack --no-warmup 으로 두 번 띄워 메모리 내역만 읽는다.
+#   GPU 를 건드리지 않고 1초면 끝나지만, GPU 쪽 실측과는 두 군데가 다르다.
+#     - 모델 크기: CPU 는 21,049 MiB 로 보고하는데 GPU 에는 20,054 MiB 만 올라간다
+#       (임베딩 995 MiB 는 호스트에 남는다) → 과대 추정(안전한 방향)
+#     - 연산 버퍼: 컨텍스트에 비례하는 몫이 CPU 1,024 B/token vs ROCm 4,693 B/token
+#       → 과소 추정(위험한 방향)
+#   두 오차가 대략 상쇄돼서 결과는 쓸 만하지만, 1순위가 되면 쓰지 않는다.
+#
+#     총량(c) = context + compute (llama.cpp 의 memory breakdown 표)
+#     per_token = (총량(c2) − 총량(c1)) / (c2 − c1)     ← KV + 어텐션 마스크
+#     fixed     = 총량(c1) − per_token × c1             ← RS/SWA 캐시 + 연산 버퍼 고정분
+#
+# [3순위] 옛 상수. 위 둘이 다 실패했을 때만 쓰고, 썼다고 화면에 찍는다.
+#
+# SKIP_CTX_PROBE=1 로 물어보는 단계를 통째로 끄면 3순위로 간다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 컨텍스트 스파이크용 예비. 2순위(CPU 측정) 경로에서만 쓴다.
+reserved_mb=300
+
+probe_tmp=""
+probe_port=$(( 18000 + RANDOM % 900 ))
+
+# [1순위] -c 없이 띄워서 llama.cpp 가 고르는 컨텍스트를 읽는다. 가중치 로딩 전에
+# 결론이 나오므로 그 줄이 찍히는 즉시 죽인다(VRAM 에 모델이 올라가지 않는다).
+# 성공하면 "<선택 n_ctx> <예상 사용 MiB> <여유 MiB> <남기는 MiB>" 한 줄을 출력.
+probe_fit() {
+  local log="$probe_tmp/fit.log" pid
+  local args=( -m "$MODEL_PATH" )
+  [ -n "${PROJ_PATH:-}" ] && args+=( --mmproj "$PROJ_PATH" )
+  [ -n "${CHOSEN_DEVICE:-}" ] && args+=( --device "$CHOSEN_DEVICE" )
+  args+=( -ngl 99 -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --parallel "$N_PARALLEL"
+          --no-warmup -v --port "$probe_port" --host 127.0.0.1 )
+  LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
+    "$SERVER_BIN" "${args[@]}" > "$log" 2>&1 &
+  pid=$!
+  timeout "${PROBE_TIMEOUT:-180}" tail -f -n +1 --pid="$pid" "$log" 2>/dev/null \
+    | grep -m1 -q 'common_fit_params: fitting params to free memory took' || true
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  awk '
+    # 마지막으로 찍힌 n_ctx 가 -fit 이 고른 값이다(줄였으면 줄인 값이 뒤에 찍힌다).
+    /llama_context: n_ctx  *=/ { nctx = $NF }
+    /common_params_fit_impl: projected to use/ {
+      s = $0; sub(/.*projected to use /, "", s); split(s, a, " "); projected = a[1]
+      t = $0; sub(/.*vs\. /,             "", t); split(t, b, " "); freemem   = b[1]
+    }
+    /common_params_fit_impl: will leave/ {
+      u = $0; sub(/.*will leave /, "", u); split(u, c, " "); leave = c[1]
+    }
+    /common_fit_params: fitting params to free memory took/ {
+      if (nctx > 0) printf "%d %d %d %d\n", nctx, projected, freemem, leave
+      exit
+    }
+  ' "$log"
+}
+
+# [2순위] CPU 전용 드라이런. $1 = 요청 컨텍스트.
+# 성공하면 "<실제 n_ctx> <context+compute MiB> <모델 MiB> <n_ctx_train>" 한 줄을 출력.
+probe_mem() {
+  local want="$1" log="$probe_tmp/probe_$1.log" pid
+  LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
+    "$SERVER_BIN" -m "$MODEL_PATH" --device none -ngl 0 --no-repack --no-warmup \
+      -c "$want" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --parallel "$N_PARALLEL" \
+      -v --port "$probe_port" --host 127.0.0.1 > "$log" 2>&1 &
+  pid=$!
+  # 메모리 내역 줄이 찍히면 볼 일이 끝났다. 서버가 포트를 열기 전이다.
+  timeout "${PROBE_TIMEOUT:-180}" tail -f -n +1 --pid="$pid" "$log" 2>/dev/null \
+    | grep -m1 -q 'common_memory_breakdown_print: |   - ' || true
+  kill -9 "$pid" 2>/dev/null || true
+  wait "$pid" 2>/dev/null || true
+  awk '
+    /llama_context: n_ctx  *=/  { nctx  = $NF }
+    /print_info: n_ctx_train/   { train = $NF }
+    # 메모리 내역 표는 두 번 이상 찍힐 수 있다(컨텍스트 재생성). 첫 표만 센다.
+    /common_memory_breakdown_print: \| memory breakdown/ { tbl++ }
+    # | - Host | <self> = <model> + <context> + <compute> |
+    tbl == 1 && /common_memory_breakdown_print: \|   - / {
+      split($0, f, "="); split(f[2], g, "+")
+      tot_model += g[1] + 0
+      tot_ctx   += (g[2] + 0) + (g[3] + 0)
+    }
+    END { if (nctx > 0 && tot_ctx > 0) printf "%d %d %d %d\n", nctx, tot_ctx, tot_model, train }
+  ' "$log"
+}
+
+fit_ok=0
+kv_probe_ok=0
+n_ctx_train=0
+
+if [ "${SKIP_CTX_PROBE:-0}" != "1" ] && [ -x "$SERVER_BIN" ] && [ -f "$MODEL_PATH" ]; then
+  probe_tmp="$(mktemp -d 2>/dev/null || echo "/tmp/llama_ctx_probe.$$")"
+  mkdir -p "$probe_tmp"
+
+  echo "컨텍스트 계산 중… (llama-server 에게 -fit 으로 물어봅니다. 가중치를 올리기 전 단계라 1초면 끝납니다)"
+  fit_out="$(probe_fit)"
+  if [ -n "$fit_out" ]; then
+    read -r fit_ctx fit_proj fit_free fit_leave <<<"$fit_out"
+    if [ "${fit_ctx:-0}" -gt 0 ]; then
+      largest_ctx="$fit_ctx"
+      fit_ok=1
+    fi
+  fi
+
+  if [ "$fit_ok" -eq 1 ]; then
+    echo "llama.cpp 가 직접 고른 값 (-fit, 백엔드=${CHOSEN_DEVICE:-CPU}, KV=${KV_TYPE}, --parallel ${N_PARALLEL}):"
+    echo "  선택된 컨텍스트 : ${largest_ctx} 토큰"
+    if [ "${fit_proj:-0}" -gt 0 ]; then
+      echo "  예상 VRAM 사용  : ${fit_proj} MiB  (여유 ${fit_free} MiB 중)"
+    fi
+    if [ "${fit_leave:-0}" -gt 0 ]; then
+      echo "  남기는 여유     : ${fit_leave} MiB  (-fitt 로 조정, 기본 1024 + mmproj 몫)"
+    fi
+  else
+    # -fit 이 없는(또는 로그 형식이 다른) 빌드. CPU 드라이런 2점 측정으로 내려간다.
+    echo "-fit 결과를 읽지 못했습니다 → CPU 드라이런 측정으로 대체합니다."
+    probe_a=$(probe_mem 8192)
+    probe_b=$(probe_mem 32768)
+    if [ -n "$probe_a" ] && [ -n "$probe_b" ]; then
+      read -r pc1 pt1 pm1 ptrain <<<"$probe_a"
+      read -r pc2 pt2 _   _      <<<"$probe_b"
+      if [ "$pc2" -gt "$pc1" ] && [ "$pt2" -gt "$pt1" ]; then
+        kv_bytes_per_token=$(awk -v a="$pt1" -v b="$pt2" -v c="$pc1" -v d="$pc2" \
+          'BEGIN{ printf "%.0f", (b-a)*1048576/(d-c) }')
+        fixed_mb=$(awk -v a="$pt1" -v c="$pc1" -v bpt="$kv_bytes_per_token" \
+          'BEGIN{ f = a - bpt*c/1048576; if (f < 0) f = 0; printf "%.0f", f }')
+        probe_model_mb="$pm1"
+        n_ctx_train="${ptrain:-0}"
+        kv_probe_ok=1
+      fi
+    fi
+  fi
+
+  if [ "$fit_ok" -eq 1 ] || [ "$kv_probe_ok" -eq 1 ]; then
+    rm -rf "$probe_tmp"
+  else
+    echo "⚠️  측정도 실패했습니다. 옛 상수로 폴백합니다 (컨텍스트를 크게 과소평가합니다)."
+    echo "    측정 로그: $probe_tmp"
+  fi
+else
+  echo "컨텍스트 계산을 건너뜁니다 (SKIP_CTX_PROBE=1 이거나 바이너리/모델 경로 없음)."
+  echo "옛 상수로 추정합니다."
+fi
+
+if [ "$fit_ok" -eq 1 ]; then
+  :   # largest_ctx 는 위에서 정해졌다.
+elif [ "$kv_probe_ok" -eq 1 ]; then
+  # 모델 가중치는 파일 크기가 아니라 llama.cpp 가 보고한 적재량을 쓴다.
+  # (쓰이지 않는 텐서는 로드되지 않는다. Qwen3.8: 파일 21392 → 21049 MiB.
+  #  반대로 Gemma4 Q8_K_P 는 파일 26013 → 26745 MiB 로 더 크다.)
+  proj_est_mb=$(awk -v p="$proj_mb" 'BEGIN{ printf "%.0f", p*1.02 }')
+  ctx_pool_mb=$(awk -v v="$vram_mb" -v m="$probe_model_mb" -v p="$proj_est_mb" \
+                    -v f="$fixed_mb" -v r="$reserved_mb" \
+    'BEGIN{ a = v - m - p - f - r; if (a < 0) a = 0; printf "%.0f", a*0.95 }')
+  largest_ctx=$(awk -v pool="$ctx_pool_mb" -v bpt="$kv_bytes_per_token" \
+    'BEGIN{ n = int(pool*1048576/bpt); n = int(n/256)*256; if (n < 1024) n = 1024; print n }')
+
+  echo "컨텍스트 예산 (CPU 드라이런 측정값, MiB):"
+  echo "  GPU 여유 VRAM            : ${vram_mb}"
+  echo "  − 모델 가중치            : ${probe_model_mb}   (파일 ${model_mb})"
+  if [ "$proj_mb" -gt 0 ]; then
+    echo "  − 프로젝션(mmproj)       : ${proj_est_mb}   (파일 ${proj_mb} × 1.02)"
+  fi
+  echo "  − 고정 오버헤드          : ${fixed_mb}   (RS/SWA 캐시 + 연산 버퍼 고정분)"
+  echo "  − 예비                   : ${reserved_mb} + 남은 양의 5%"
+  echo "  = 컨텍스트에 쓸 수 있는 양: ${ctx_pool_mb}"
+  echo "  토큰당 비용              : ${kv_bytes_per_token} B  ($(awk -v b="$kv_bytes_per_token" 'BEGIN{printf "%.1f", 1048576/b}') tokens/MiB)"
+  echo "  ※ GPU 쪽 연산 버퍼는 이보다 큽니다. 여유가 빠듯하면 -c 를 직접 낮춰 주세요."
+  if [ "${vram_mb:-0}" -le 0 ]; then
+    # VRAM 감지 실패. 측정값은 맞지만 나눌 예산을 모르므로 옛 기본값으로 돌아간다.
+    largest_ctx=8192
+    echo "GPU 여유 VRAM 을 감지하지 못해 예산을 계산할 수 없습니다 → 기본 ${largest_ctx} 토큰."
+  elif [ "$ctx_pool_mb" -le 0 ]; then
+    echo "⚠️  모델(+프로젝션+오버헤드)만으로 여유 VRAM 을 다 씁니다. 이대로면 로드에 실패하거나"
+    echo "    일부 층이 CPU 로 밀립니다. 더 작은 양자화를 쓰거나 -ngl 을 낮추세요."
+  fi
+else
+  # 폴백: 모델 구조를 보지 않는 옛 상수. 대체로 크게 과대평가한다(= 컨텍스트 손해).
+  #   q4_0 ≈ 0.5625 B/원소 → 약 16 tokens/MB
+  #   q8_0 ≈ 1.0625 B/원소 → 약 8.5 tokens/MB
+  #   f16  = 2.0    B/원소 → 약 4.5 tokens/MB
+  case "$KV_TYPE" in
+    f16|bf16|f32) tokens_per_mb=4.5 ;;
+    q8_0)         tokens_per_mb=8.5 ;;
+    *)            tokens_per_mb=16  ;;
+  esac
+  est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$reserved_mb" \
+    'BEGIN{ if (v <= 0) { print 0; exit } estm = m*1.02; estp = p*1.05; a = v - estm - estp - r; if (a < 0) a = 0; print a }')
+  echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 적재 후 예상 여유 VRAM: ${est_available_mb} MB"
+  largest_ctx=$(awk -v a="$est_available_mb" -v t="$tokens_per_mb" \
+    'BEGIN{ if (a <= 0) { print 8192; exit } d = int(a*t); if (d < 1024) d = 1024; print d }')
+fi
+
+# 학습 컨텍스트(n_ctx_train) 상한. 2순위 경로에서만 필요하다.
+# (-fit 은 애초에 학습 컨텍스트를 넘겨 고르지 않는다.) 넘겨서 띄우는 것 자체는
+# llama.cpp 가 허용하지만(RoPE 외삽) 품질 이득 없이 VRAM 만 먹는다. 그래도 필요하면
+# 아래 프롬프트에 더 큰 값을 직접 넣으면 그대로 쓴다.
+if [ "${n_ctx_train:-0}" -gt 0 ] && [ "$largest_ctx" -gt "$n_ctx_train" ]; then
+  echo "VRAM 으로는 ${largest_ctx} 토큰까지 가능하지만 학습 컨텍스트 ${n_ctx_train} 으로 제한합니다."
+  largest_ctx=$n_ctx_train
+fi
 
 # 자동 계산값 상한. 위에서 Vulkan 이면 KV 를 f16 으로 바꿔 성능 절벽 자체를 피했으므로
 # (f16 은 ctx 32768/65536 에서도 70~71 t/s 로 평탄한 것을 확인) 백엔드별 상한은 두지 않는다.
@@ -519,16 +735,34 @@ if [ "$max_auto_ctx" -gt 0 ] && [ "$largest_ctx" -gt "$max_auto_ctx" ]; then
   largest_ctx=$max_auto_ctx
 fi
 
-echo "Calculated largest context length (Optimized Heuristic): ${largest_ctx} tokens"
-echo "You may enter a desired -c value. If you enter an invalid value or press Enter, the script will use -c ${largest_ctx} as fallback."
+echo "Calculated largest context length: ${largest_ctx} tokens"
+
+# [FIX 2026-08-21] 1순위(-fit)로 값을 얻었고 별도 상한도 없으면, Enter 시 -c 를 아예
+# 넘기지 않는다. 같은 계산을 기동 시점에 llama.cpp 가 다시 하므로 값은 같고, 그 사이
+# VRAM 사정이 바뀌었으면 llama.cpp 가 알아서 줄여서 뜬다(우리가 박아 넣으면 OOM 난다).
+# 사용자가 숫자를 넣으면 그대로 -c 로 넘긴다 — 기존 동작 그대로다.
+fit_delegate=0
+if [ "$fit_ok" -eq 1 ] && [ "${max_auto_ctx:-0}" -eq 0 ]; then
+  fit_delegate=1
+  echo "Enter 를 누르면 -c 를 지정하지 않고 llama.cpp 의 -fit 에 맡깁니다 (위와 같은 값이 나오고,"
+  echo "그 사이 VRAM 이 줄었으면 알아서 낮춰 뜹니다). 숫자를 넣으면 그 값을 그대로 씁니다."
+else
+  echo "Enter 를 누르면 -c ${largest_ctx} 로 띄웁니다."
+fi
 read -p "Enter desired context tokens (-c) [largest: ${largest_ctx}]: " user_c
 
+C_ARGS=()
 if [[ "$user_c" =~ ^[0-9]+$ ]] && [ "$user_c" -gt 0 ]; then
   c_opt="$user_c"
+  C_ARGS=( -c "$c_opt" )
   echo "Using user-specified -c $c_opt"
+elif [ "$fit_delegate" -eq 1 ]; then
+  c_opt="$largest_ctx"          # 화면 표시용. 실제로는 -c 를 넘기지 않는다.
+  echo "-c 를 넘기지 않고 llama.cpp 의 -fit 에 맡깁니다 (예상 ${c_opt} 토큰)."
 else
   c_opt=${largest_ctx}
-  echo "Invalid or empty input — falling back to -c $c_opt"
+  C_ARGS=( -c "$c_opt" )
+  echo "Empty or invalid input — falling back to -c $c_opt"
 fi
 
 # Start server
@@ -546,7 +780,7 @@ fi
 
 # Flash Attention(-fa) & Q4 KV cache applies
 # --host 127.0.0.1: 로컬 전용 (외부 HTTP 차단 — 외부 접근은 Caddy HTTPS 사용)
-ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 -c "$c_opt" --parallel "$N_PARALLEL" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
+ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 "${C_ARGS[@]}" --parallel "$N_PARALLEL" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
 # [FIX] LD_LIBRARY_PATH는 여기, llama-server 프로세스 하나에만 적용한다(전역 export 아님).
