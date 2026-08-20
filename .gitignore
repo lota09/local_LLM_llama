@@ -5,3 +5,4 @@ llama_server*/
 trash/
 logs/
 .caddy/
+__pycache__/
