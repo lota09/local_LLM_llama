@@ -210,6 +210,86 @@ if [ "$OS_NAME" = "Darwin" ]; then
 fi
 
 # --- 3b. NVIDIA CUDA 탐색 (Linux) ---
+# CUDA toolkit은 필수 의존성이므로, GPU가 있더라도 nvcc가 없으면 자동 설치를 시도한다.
+_ensure_cuda_toolkit() {
+  if command -v nvcc >/dev/null 2>&1; then
+    return 0
+  fi
+
+  local conda_cmd=""
+  for root in "${CONDA_ROOTS[@]:-}"; do
+    [ -n "$root" ] || continue
+    if [ -x "$root/bin/conda" ]; then
+      conda_cmd="$root/bin/conda"
+      break
+    fi
+  done
+
+  if [ -z "$conda_cmd" ] && command -v conda >/dev/null 2>&1; then
+    conda_cmd="conda"
+  fi
+
+  if [ -n "$conda_cmd" ]; then
+    echo "NVIDIA GPU가 감지됐지만 nvcc가 없습니다. conda에서 CUDA Toolkit을 설치합니다: conda install -c nvidia cuda-toolkit"
+    "$conda_cmd" install -y -c nvidia cuda-toolkit 2>&1 | tail -20 || true
+  else
+    echo "conda를 찾지 못해 CUDA Toolkit 자동 설치를 건너뜁니다."
+  fi
+
+  # 설치 후 재탐색
+  for c in \
+    "/usr/local/cuda/bin/nvcc" \
+    "/usr/local/cuda-12/bin/nvcc" \
+    "/usr/local/cuda-12.6/bin/nvcc" \
+    "/usr/local/cuda-12.4/bin/nvcc" \
+    "/usr/local/cuda-11/bin/nvcc" \
+    "/usr/cuda/bin/nvcc" \
+    "$(command -v nvcc 2>/dev/null || true)" \
+    $(find /usr/local -name nvcc -type f 2>/dev/null | head -n10 || true) \
+    "${CONDA_ROOTS[@]:-}"/bin/nvcc ; do
+    [ -n "$c" ] || continue
+    if [ -x "$c" ]; then
+      NVCC_BIN="$c"
+      break
+    fi
+  done
+
+  # conda CUDA는 보통 $PREFIX/targets/<arch>/include 에 헤더가 있고,
+  # $PREFIX/include/ 에는 없는 패키지가 많다. nvcc는 $PREFIX/include 를 기본 포함 경로로
+  # 보므로, 실제 헤더들이 있는 targets 경로를 루트 include 로 연결해 준다.
+  if [ -n "$NVCC_BIN" ]; then
+    local conda_prefix="$(dirname "$(dirname "$NVCC_BIN")")"
+    local cuda_targets_include=""
+    for d in \
+      "$conda_prefix/targets/x86_64-linux/include" \
+      "$conda_prefix/targets/aarch64-linux/include" \
+      "$conda_prefix/targets/sbsa-linux/include" \
+      "$conda_prefix/targets/ppc64le-linux/include"; do
+      if [ -f "$d/cuda_runtime.h" ]; then
+        cuda_targets_include="$d"
+        break
+      fi
+    done
+
+    if [ -n "$cuda_targets_include" ] && [ ! -f "$conda_prefix/include/cuda_runtime.h" ]; then
+      mkdir -p "$conda_prefix/include"
+      for header in "$cuda_targets_include"/*.h; do
+        [ -e "$header" ] || continue
+        ln -sf "$header" "$conda_prefix/include/$(basename "$header")"
+      done
+      for header in "$cuda_targets_include"/crt/*.h; do
+        [ -e "$header" ] || continue
+        mkdir -p "$conda_prefix/include/crt"
+        ln -sf "$header" "$conda_prefix/include/crt/$(basename "$header")"
+      done
+      echo "conda CUDA include 경로 보정: $cuda_targets_include -> $conda_prefix/include"
+    fi
+  fi
+
+  [ -n "$NVCC_BIN" ] && return 0
+  return 1
+}
+
 if [ "$USE_METAL" -eq 0 ]; then
   CUDA_CANDIDATES=(
     "/usr/local/cuda/bin/nvcc"
@@ -227,9 +307,12 @@ if [ "$USE_METAL" -eq 0 ]; then
       break
     fi
   done
-  # nvcc는 없지만 nvidia-smi가 있으면 더 넓게 탐색
+  # nvcc는 없지만 nvidia-smi가 있으면 더 넓게 탐색하고, 그래도 없으면 conda로 자동 설치
   if [ -z "$NVCC_BIN" ] && command -v nvidia-smi >/dev/null 2>&1; then
     NVCC_BIN=$(find /usr/local -name nvcc -type f 2>/dev/null | head -n1 || true)
+    if [ -z "$NVCC_BIN" ]; then
+      _ensure_cuda_toolkit || true
+    fi
   fi
 
   if [ -n "$NVCC_BIN" ]; then
@@ -425,8 +508,13 @@ if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$OS_NAME" = "Linux" ]; 
 
   # (iii) 마지막 수단: PCI ID → gfx 매핑 (ROCm 유저스페이스가 아예 없어도 동작)
   if [ -z "$GPU_ARCH" ]; then
-    PCI_ID=$(lspci -nn 2>/dev/null | grep -iE 'VGA|Display|3D' | grep -i 'AMD/ATI' \
-             | grep -oE '\[1002:[0-9a-f]{4}\]' | head -1 | tr -d '[]' | cut -d: -f2)
+    PCI_ID=$(lspci -nn 2>/dev/null \
+      | grep -iE 'VGA|Display|3D' \
+      | grep -i 'AMD/ATI' \
+      | grep -oE '\[1002:[0-9a-f]{4}\]' \
+      | head -1 \
+      | tr -d '[]' \
+      | cut -d: -f2 || true)
     case "$PCI_ID" in
       66a0|66a1|66a3|66a7|66af) GPU_ARCH=gfx906 ;;   # Vega 20 / MI50, MI60, Radeon VII
       6860|6861|6862|6863|687f) GPU_ARCH=gfx900 ;;   # Vega 10 / MI25
@@ -434,6 +522,7 @@ if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$OS_NAME" = "Linux" ]; 
       7408|740c|740f)           GPU_ARCH=gfx90a ;;   # MI200
       73bf|73df|73ff)           GPU_ARCH=gfx1030 ;;  # RDNA2
       744c|7448)                GPU_ARCH=gfx1100 ;;  # RDNA3
+      *)                       GPU_ARCH="" ;;
     esac
     [ -n "$GPU_ARCH" ] && echo "  (PCI 1002:$PCI_ID 로 추정)"
   fi
@@ -860,6 +949,36 @@ if [ "$USE_CUDA" -eq 1 ]; then
   echo "CUDA 빌드 활성화: -DGGML_CUDA=ON"
   CMAKE_ARGS+=(-DGGML_CUDA=ON)
   [ -n "$NVCC_BIN" ] && CMAKE_ARGS+=(-DCMAKE_CUDA_COMPILER="$NVCC_BIN")
+
+  CUDA_PREFIX="$(dirname "$(dirname "$NVCC_BIN")")"
+  if [ -d "$CUDA_PREFIX/targets" ]; then
+    CUDA_TARGET_INCLUDE="$(find "$CUDA_PREFIX/targets" -path '*/include' -type d 2>/dev/null | head -n1 || true)"
+    if [ -n "$CUDA_TARGET_INCLUDE" ] && [ -f "$CUDA_TARGET_INCLUDE/cuda_runtime.h" ]; then
+      # Newer CUDA packages place CUB/Thrust below the CCCL include directory.
+      CUDA_CCCL_INCLUDE=""
+      if [ -f "$CUDA_TARGET_INCLUDE/cccl/cub/cub.cuh" ]; then
+        CUDA_CCCL_INCLUDE="$CUDA_TARGET_INCLUDE/cccl"
+      fi
+      export CUDA_HOME="$CUDA_PREFIX"
+      export CUDA_PATH="$CUDA_PREFIX"
+      export CUDAToolkit_ROOT="$CUDA_PREFIX"
+      export CUDA_TOOLKIT_ROOT_DIR="$CUDA_PREFIX"
+      export CPATH="$CUDA_TARGET_INCLUDE:${CPATH:-}"
+      export CPLUS_INCLUDE_PATH="$CUDA_TARGET_INCLUDE:${CPLUS_INCLUDE_PATH:-}"
+      if [ -n "$CUDA_CCCL_INCLUDE" ]; then
+        export CPATH="$CUDA_CCCL_INCLUDE:$CPATH"
+        export CPLUS_INCLUDE_PATH="$CUDA_CCCL_INCLUDE:$CPLUS_INCLUDE_PATH"
+        echo "CUDA CCCL include 경로 추가: $CUDA_CCCL_INCLUDE"
+      fi
+      export LIBRARY_PATH="$CUDA_PREFIX/lib:${CUDA_PREFIX}/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
+      export LD_LIBRARY_PATH="$CUDA_PREFIX/lib:${CUDA_PREFIX}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
+      echo "CUDA include/root 강제 지정: CUDA_HOME=$CUDA_HOME CUDAToolkit_ROOT=$CUDAToolkit_ROOT"
+      CMAKE_ARGS+=(-DCUDAToolkit_ROOT="$CUDA_PREFIX")
+      CUDA_TOOLKIT_INCLUDES="$CUDA_TARGET_INCLUDE"
+      [ -n "$CUDA_CCCL_INCLUDE" ] && CUDA_TOOLKIT_INCLUDES="$CUDA_TOOLKIT_INCLUDES;$CUDA_CCCL_INCLUDE"
+      CMAKE_ARGS+=(-DCMAKE_CUDA_TOOLKIT_INCLUDE_DIRECTORIES="$CUDA_TOOLKIT_INCLUDES")
+    fi
+  fi
 elif [ "$USE_ROCM" -eq 1 ]; then
   echo "ROCm(HIP) 빌드 활성화: -DGGML_HIP=ON"
   CMAKE_ARGS+=(-DGGML_HIP=ON)
@@ -999,8 +1118,21 @@ if [ "$USE_CUDA" -eq 1 ]; then
     fi
   done
 
+  if [ -z "$HOST_GCC" ] && command -v apt-get >/dev/null 2>&1; then
+    echo "CUDA 12.x 호환 GCC(<=13)가 없어 시스템 패키지를 설치합니다: gcc-13 g++-13"
+    _sudo apt-get update >/dev/null 2>&1 || true
+    _sudo apt-get install -y gcc-13 g++-13 2>&1 | tail -20 || true
+    for cand in /usr/bin/gcc-13 /usr/bin/g++-13; do
+      [ -x "$cand" ] || continue
+      if [ "${cand##*/}" = "gcc-13" ]; then
+        HOST_GCC="$cand"
+      fi
+    done
+  fi
+
   if [ -n "$HOST_GCC" ]; then
     CMAKE_ARGS+=(-DCMAKE_CUDA_HOST_COMPILER="$HOST_GCC")
+    CMAKE_ARGS+=(-DCMAKE_CUDA_HOST_COMPILER="$(echo "$HOST_GCC" | sed 's/gcc$/g++/' 2>/dev/null || echo "$HOST_GCC")")
   else
     # <=13 host gcc가 없음 → CUDA를 끄지 않고, 래퍼로 강행 시도
     echo "Warning: GCC<=13 미발견 → nvcc에 --allow-unsupported-compiler 래퍼 적용"
