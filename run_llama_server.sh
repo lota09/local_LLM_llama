@@ -296,10 +296,24 @@ if [ ${#ALL_GGUF[@]} -eq 0 ]; then
   fi
 else
   mapfile -t PROJ_CANDS < <(printf '%s\n' "${ALL_GGUF[@]}" | grep -i mmproj || true)
+  # MTP 사이드카 탐지. download_model.py 는 '<이름>_mtp.gguf' 로 저장하지만,
+  # HF 원본 파일명(…-FastMTP-32K.gguf)을 그대로 넣어 둔 경우도 받아 준다.
+  # 패턴을 더 넓히면 안 된다: 본 모델 파일 이름이 '-MTP.gguf' 로 끝나는 경우가 흔한데
+  # (저장소 이름에서 딴 디렉터리 이름 때문) 그걸 사이드카로 오인하면 30GB 짜리
+  # 본 모델이 드래프트 자리로 넘어간다.
+  mapfile -t MTP_CANDS < <(printf '%s\n' "${ALL_GGUF[@]}" \
+    | grep -Ei '(_mtp\.gguf|[-_.]fastmtp([-_.][^/]*)?\.gguf|/mtp[-_.][^/]*\.gguf)$' || true)
+  if [ ${#MTP_CANDS[@]} -gt 0 ]; then
+    MTP_PATH="${MTP_CANDS[0]}"
+    echo "Auto-detected MTP draft model: $MTP_PATH"
+  else
+    MTP_PATH=""
+  fi
   # model candidates are gguf files excluding mmproj
   model_tmp=()
   for f in "${ALL_GGUF[@]}"; do
-    if ! printf '%s\n' "${PROJ_CANDS[@]}" | grep -qx "${f}" 2>/dev/null; then
+    if ! printf '%s\n' "${PROJ_CANDS[@]}" | grep -qx "${f}" 2>/dev/null \
+        && ! printf '%s\n' "${MTP_CANDS[@]}" | grep -qx "${f}" 2>/dev/null; then
       model_tmp+=("$f")
     fi
   done
@@ -394,6 +408,77 @@ if [[ "$IS_VISION" =~ ^[Yy]$ ]] && [ -z "${PROJ_PATH:-}" ]; then
   fi
 fi
 
+# ─────────────────────────────────────────────────────────────────────────────
+# MTP(다중 토큰 예측) 설정
+#
+# 갈래가 둘인데 예전 코드는 (2)만 처리했다.
+#   (1) 내장 MTP : 본 모델 GGUF 안에 nextn 블록이 들어 있으면 사이드카 없이
+#                  '--spec-type draft-mtp' 만으로 켜진다. llama.cpp 가 타깃 모델
+#                  자신을 상대로 MTP 드래프트 컨텍스트를 만든다.
+#   (2) 사이드카 : 본 모델에 nextn 이 없고 별도 MTP GGUF 가 있을 때
+#                  '--model-draft <사이드카>' 를 같이 넘긴다(Gemma4 계열이 이쪽).
+# 그래서 nextn 이 내장된 models/…-Q8_K_P-MTP.gguf 로 띄우면, 디렉터리에 사이드카
+# 파일이 없다는 이유만으로 MTP 플래그가 하나도 안 붙은 채 돌고 있었다.
+#
+# 판정은 GGUF 헤더 grep 한 번. 메타데이터 KV 는 파일 앞쪽이지만 토크나이저 배열
+# (248k 토큰) 뒤에 오는 키가 있어 실측 오프셋이 11MB 근처였다 → 64MB 를 훑는다.
+# MTP=0 으로 통째로 끌 수 있다.
+# ─────────────────────────────────────────────────────────────────────────────
+_gguf_has_str() {   # $1: gguf 파일, $2: 찾을 문자열(고정 문자열)
+  [ -f "$1" ] || return 1
+  head -c 67108864 "$1" 2>/dev/null | LC_ALL=C grep -q -a -m1 -F -- "$2"
+}
+
+# 사이드카가 d2t(드래프트 어휘 축소 맵) 텐서를 갖고 있으면 stock llama.cpp 로는
+# 못 읽는다(HauhauCS FastMTP 방식). GGUF 는 텐서 이름을 '길이(8바이트 LE) + 이름'
+# 으로 저장하므로 길이 접두까지 같이 봐야 토크나이저 문자열과 안 헷갈린다
+# (실측: 그냥 'd2t' 로 찾으면 Gemma 사이드카에서 4번 오탐).
+_gguf_has_d2t_tensor() {
+  [ -f "$1" ] || return 1
+  head -c 67108864 "$1" 2>/dev/null | LC_ALL=C grep -q -a -P '\x03\x00{7}d2t' 2>/dev/null
+}
+
+# 설치된 llama.cpp 가 그 d2t 를 읽을 수 있는가(= HauhauCS 런타임 패치가 들어갔는가).
+_llama_has_d2t_support() {
+  LC_ALL=C grep -q -a -F 'd2t draft-vocab trim' \
+    "$SELECTED_DIR"/libllama*.so* "$SERVER_BIN" 2>/dev/null
+}
+
+MTP_ARGS=()
+MTP_EMBEDDED=0
+if [ "${MTP:-1}" = "0" ]; then
+  echo "MTP: 환경변수 MTP=0 → 비활성화"
+  MTP_PATH=""
+else
+  if _gguf_has_str "$MODEL_PATH" "nextn_predict_layers"; then
+    MTP_EMBEDDED=1
+  fi
+
+  if [ -n "${MTP_PATH:-}" ] && _gguf_has_d2t_tensor "$MTP_PATH" \
+      && ! _llama_has_d2t_support; then
+    echo "⚠️  MTP 사이드카가 d2t(축소 어휘) 방식입니다: $(basename "$MTP_PATH")"
+    echo "    지금 설치된 llama-server 에는 이걸 읽는 코드가 없습니다. 그대로 넘기면"
+    echo "    드래프트 로딩이 'expected …, got …' 텐서 크기 불일치로 실패합니다."
+    echo "    (해결: 모델 저장소의 HauhauCS-FastMTP-llama.cpp.patch 를 적용해 재빌드)"
+    if [ "$MTP_EMBEDDED" -eq 1 ]; then
+      echo "    → 본 모델에 MTP 가 내장돼 있으므로 사이드카 없이 내장 MTP 로 진행합니다."
+    else
+      echo "    → MTP 를 끄고 진행합니다."
+    fi
+    MTP_PATH=""
+  fi
+
+  if [ -n "${MTP_PATH:-}" ]; then
+    MTP_ARGS=( --model-draft "$MTP_PATH" --spec-type draft-mtp )
+    echo "MTP: 사이드카 사용 — $(basename "$MTP_PATH")"
+  elif [ "$MTP_EMBEDDED" -eq 1 ]; then
+    MTP_ARGS=( --spec-type draft-mtp )
+    echo "MTP: 본 모델에 내장된 MTP 사용 (--spec-type draft-mtp, 사이드카 없음)"
+  else
+    echo "MTP: 사용 안 함 (본 모델에 nextn 블록이 없고 사이드카도 없습니다)"
+  fi
+fi
+
 LOG_FILE="logs/llama_server.log"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -408,12 +493,24 @@ if [ -n "$PROJ_PATH" ] && [ -f "$PROJ_PATH" ]; then
   proj_bytes=$(stat -c%s "$PROJ_PATH" 2>/dev/null || stat -f%z "$PROJ_PATH" 2>/dev/null || echo 0)
 fi
 
+# MTP 사이드카도 VRAM 을 먹는다(903MB 짜리도 있다). 1순위 -fit 경로는 드래프트를
+# 같이 올려서 재보므로 자동으로 반영되지만, 2·3순위 추정 경로는 파일 크기로만
+# 계산하므로 여기서 같이 빼 주지 않으면 그만큼 컨텍스트를 과대평가한다.
+mtp_bytes=0
+if [ -n "${MTP_PATH:-}" ] && [ -f "$MTP_PATH" ]; then
+  mtp_bytes=$(stat -c%s "$MTP_PATH" 2>/dev/null || stat -f%z "$MTP_PATH" 2>/dev/null || echo 0)
+fi
+
 model_mb=$(( (model_bytes + 1024*1024 - 1) / (1024*1024) ))
 proj_mb=$(( (proj_bytes + 1024*1024 - 1) / (1024*1024) ))
+mtp_mb=$(( (mtp_bytes + 1024*1024 - 1) / (1024*1024) ))
 
 echo "Model size: ${model_mb} MB"
 if [ $proj_mb -gt 0 ]; then
   echo "Projection size: ${proj_mb} MB"
+fi
+if [ $mtp_mb -gt 0 ]; then
+  echo "MTP draft size: ${mtp_mb} MB"
 fi
 
 # GPU 여유 VRAM (MB) — 위에서 --list-devices 로 감지해 둔 값을 그대로 사용.
@@ -549,6 +646,7 @@ probe_fit() {
   local log="$probe_tmp/fit.log" pid
   local args=( -m "$MODEL_PATH" )
   [ -n "${PROJ_PATH:-}" ] && args+=( --mmproj "$PROJ_PATH" )
+  args+=( "${MTP_ARGS[@]}" )
   [ -n "${CHOSEN_DEVICE:-}" ] && args+=( --device "$CHOSEN_DEVICE" )
   args+=( -ngl 99 -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --parallel "$N_PARALLEL"
           --no-warmup -v --port "$probe_port" --host 127.0.0.1 )
@@ -670,9 +768,10 @@ elif [ "$kv_probe_ok" -eq 1 ]; then
   # (쓰이지 않는 텐서는 로드되지 않는다. Qwen3.8: 파일 21392 → 21049 MiB.
   #  반대로 Gemma4 Q8_K_P 는 파일 26013 → 26745 MiB 로 더 크다.)
   proj_est_mb=$(awk -v p="$proj_mb" 'BEGIN{ printf "%.0f", p*1.02 }')
+  mtp_est_mb=$(awk -v x="$mtp_mb" 'BEGIN{ printf "%.0f", x*1.02 }')
   ctx_pool_mb=$(awk -v v="$vram_mb" -v m="$probe_model_mb" -v p="$proj_est_mb" \
-                    -v f="$fixed_mb" -v r="$reserved_mb" \
-    'BEGIN{ a = v - m - p - f - r; if (a < 0) a = 0; printf "%.0f", a*0.95 }')
+                    -v x="$mtp_est_mb" -v f="$fixed_mb" -v r="$reserved_mb" \
+    'BEGIN{ a = v - m - p - x - f - r; if (a < 0) a = 0; printf "%.0f", a*0.95 }')
   largest_ctx=$(awk -v pool="$ctx_pool_mb" -v bpt="$kv_bytes_per_token" \
     'BEGIN{ n = int(pool*1048576/bpt); n = int(n/256)*256; if (n < 1024) n = 1024; print n }')
 
@@ -681,6 +780,9 @@ elif [ "$kv_probe_ok" -eq 1 ]; then
   echo "  − 모델 가중치            : ${probe_model_mb}   (파일 ${model_mb})"
   if [ "$proj_mb" -gt 0 ]; then
     echo "  − 프로젝션(mmproj)       : ${proj_est_mb}   (파일 ${proj_mb} × 1.02)"
+  fi
+  if [ "$mtp_mb" -gt 0 ]; then
+    echo "  − MTP 드래프트           : ${mtp_est_mb}   (파일 ${mtp_mb} × 1.02)"
   fi
   echo "  − 고정 오버헤드          : ${fixed_mb}   (RS/SWA 캐시 + 연산 버퍼 고정분)"
   echo "  − 예비                   : ${reserved_mb} + 남은 양의 5%"
@@ -705,9 +807,11 @@ else
     q8_0)         tokens_per_mb=8.5 ;;
     *)            tokens_per_mb=16  ;;
   esac
-  est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v r="$reserved_mb" \
-    'BEGIN{ if (v <= 0) { print 0; exit } estm = m*1.02; estp = p*1.05; a = v - estm - estp - r; if (a < 0) a = 0; print a }')
-  echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+예비(${reserved_mb}MB) 적재 후 예상 여유 VRAM: ${est_available_mb} MB"
+  est_available_mb=$(awk -v v="$vram_mb" -v m="$model_mb" -v p="$proj_mb" -v x="$mtp_mb" \
+                         -v r="$reserved_mb" \
+    'BEGIN{ if (v <= 0) { print 0; exit } estm = m*1.02; estp = p*1.05; estx = x*1.02;
+            a = v - estm - estp - estx - r; if (a < 0) a = 0; print a }')
+  echo "모델(${model_mb}MB)+프로젝션(${proj_mb}MB)+MTP(${mtp_mb}MB)+예비(${reserved_mb}MB) 적재 후 예상 여유 VRAM: ${est_available_mb} MB"
   largest_ctx=$(awk -v a="$est_available_mb" -v t="$tokens_per_mb" \
     'BEGIN{ if (a <= 0) { print 8192; exit } d = int(a*t); if (d < 1024) d = 1024; print d }')
 fi
@@ -771,6 +875,7 @@ ARGS=( -m "$MODEL_PATH" )
 if [ -n "$PROJ_PATH" ]; then
   ARGS+=( --mmproj "$PROJ_PATH" )
 fi
+ARGS+=( "${MTP_ARGS[@]}" )
 
 # CHOSEN_DEVICE가 비어있으면(CPU-only 빌드, 또는 디바이스 자동감지 실패) --device를
 # 아예 넘기지 않는다 — llama.cpp가 기본 동작(전체 디바이스 자동 사용 또는 CPU)에 위임.

@@ -180,14 +180,14 @@ fi
 
 echo "사용할 cmake: $CMAKE_BIN"
 
-# cmake가 conda 환경 소속이면 해당 lib를 LD_LIBRARY_PATH에 추가
+# conda CMake는 자체 RPATH($ORIGIN/../lib)를 가지므로 런타임 경로를 전역으로
+# 주입하지 않는다. 전역 LD_LIBRARY_PATH는 make가 실행하는 bash까지 conda
+# libtinfo를 로드하게 만들어 불필요한 경고와 ABI 혼용을 일으킨다.
 CMAKE_REALPATH=$(realpath "$CMAKE_BIN" 2>/dev/null || echo "$CMAKE_BIN")
 CMAKE_DIR=$(dirname "$CMAKE_REALPATH")
 CONDA_ENV_LIB="${CMAKE_DIR%/bin}/lib"
 if [ -d "$CONDA_ENV_LIB" ]; then
-  export LD_LIBRARY_PATH="$CONDA_ENV_LIB:${LD_LIBRARY_PATH:-}"
-  export LIBRARY_PATH="$CONDA_ENV_LIB:${LIBRARY_PATH:-}"
-  echo "LD_LIBRARY_PATH/LIBRARY_PATH 앞에 추가: $CONDA_ENV_LIB"
+  echo "conda CMake 자체 RPATH 사용: $CONDA_ENV_LIB"
 fi
 
 # ─────────────────────────────────────────────
@@ -970,8 +970,6 @@ if [ "$USE_CUDA" -eq 1 ]; then
         export CPLUS_INCLUDE_PATH="$CUDA_CCCL_INCLUDE:$CPLUS_INCLUDE_PATH"
         echo "CUDA CCCL include 경로 추가: $CUDA_CCCL_INCLUDE"
       fi
-      export LIBRARY_PATH="$CUDA_PREFIX/lib:${CUDA_PREFIX}/targets/x86_64-linux/lib:${LIBRARY_PATH:-}"
-      export LD_LIBRARY_PATH="$CUDA_PREFIX/lib:${CUDA_PREFIX}/targets/x86_64-linux/lib:${LD_LIBRARY_PATH:-}"
       echo "CUDA include/root 강제 지정: CUDA_HOME=$CUDA_HOME CUDAToolkit_ROOT=$CUDAToolkit_ROOT"
       CMAKE_ARGS+=(-DCUDAToolkit_ROOT="$CUDA_PREFIX")
       CUDA_TOOLKIT_INCLUDES="$CUDA_TARGET_INCLUDE"
@@ -1084,16 +1082,9 @@ esac
 JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 echo "병렬 빌드 잡: $JOBS"
 
-# 링커 최적화 플래그(--as-needed)는 GNU ld에서만 유효.
-# macOS(Mach-O ld)/lld 등에서는 인식 못 하므로 GNU ld일 때만, 그리고
-# (컴파일이 아닌) "링커" 플래그 변수에 넣는다. CXX_FLAGS에 넣던 기존 버그를 교정.
-if [ "$OS_NAME" = "Linux" ] && ld --version 2>/dev/null | grep -qi "GNU ld"; then
-  echo "GNU ld 감지 → -Wl,--as-needed 링커 플래그 추가"
-  CMAKE_ARGS+=("-DCMAKE_EXE_LINKER_FLAGS=-Wl,--as-needed")
-  CMAKE_ARGS+=("-DCMAKE_SHARED_LINKER_FLAGS=-Wl,--as-needed")
-fi
+# 링커 플래그는 호스트 툴체인을 확정한 뒤 아래에서 추가한다.
 # 주: -fPIC는 llama.cpp가 공유 라이브러리 빌드 시 cmake가 자동 부여하므로
-#     직접 지정하지 않는다(이식성 + 중복 방지). 기존의 깨진 '-fPIC\ -Wl,...' 제거.
+#     직접 지정하지 않는다(이식성 + 중복 방지).
 
 # ─────────────────────────────────────────────
 # 4b. CUDA 전용: host gcc 호환성 처리
@@ -1131,8 +1122,13 @@ if [ "$USE_CUDA" -eq 1 ]; then
   fi
 
   if [ -n "$HOST_GCC" ]; then
-    CMAKE_ARGS+=(-DCMAKE_CUDA_HOST_COMPILER="$HOST_GCC")
-    CMAKE_ARGS+=(-DCMAKE_CUDA_HOST_COMPILER="$(echo "$HOST_GCC" | sed 's/gcc$/g++/' 2>/dev/null || echo "$HOST_GCC")")
+    # nvcc는 실행 중 자체 CUDA bin 경로를 PATH 앞에 삽입한다. 그러면 host
+    # GCC가 다시 conda ld를 선택하므로, 시스템 binutils를 보장하는 래퍼를 쓴다.
+    CUDA_HOST_WRAPPER="/tmp/cuda-host-gcc-$$"
+    printf '%s\n' '#!/usr/bin/env bash' 'export PATH=/usr/bin:/bin' "exec $HOST_GCC \"\$@\"" >"$CUDA_HOST_WRAPPER"
+    chmod +x "$CUDA_HOST_WRAPPER"
+    trap 'rm -f "$CUDA_HOST_WRAPPER"' EXIT
+    CMAKE_ARGS+=(-DCMAKE_CUDA_HOST_COMPILER="$CUDA_HOST_WRAPPER")
   else
     # <=13 host gcc가 없음 → CUDA를 끄지 않고, 래퍼로 강행 시도
     echo "Warning: GCC<=13 미발견 → nvcc에 --allow-unsupported-compiler 래퍼 적용"
@@ -1192,6 +1188,14 @@ GEN_PROG=$(_find_first ninja make || true)
 HOST_CC=$(_find_first_nonconda cc gcc clang || true)
 HOST_CXX=$(_find_first_nonconda c++ g++ clang++ || true)
 
+# 컴파일러와 링커는 서로 별도로 선택된다. conda 환경이 PATH 앞에 있으면
+# /usr/bin/cc 를 골라도 GCC가 conda 의 ld 를 실행할 수 있다. conda ld 는
+# 시스템 glibc 와 링크할 때 심볼 버전 충돌을 일으키므로, 시스템 링커를 명시한다.
+HOST_LD=$(_find_first_nonconda ld || true)
+if [ -z "$HOST_LD" ] && [ -x /usr/bin/ld ]; then
+  HOST_LD=/usr/bin/ld
+fi
+
 # 시스템에 이미 깔린 LLVM 도 후보다. ROCm 을 설치하면 /usr/lib/llvm-21/bin/clang++ 가
 # 딸려 오는데 PATH 에는 안 잡힌다. HIP 컴파일러와 같은 계열이라 링커/glibc 세대가
 # 어긋나지 않는다. 설치가 전혀 필요 없는 선택지이므로 패키지 설치를 시도하기 **전에**
@@ -1224,6 +1228,22 @@ if [ -z "$GEN_PROG" ] || [ -z "$HOST_CXX" ]; then
   GEN_PROG=$(_find_first ninja make || true)
   [ -n "$HOST_CC" ]  || HOST_CC=$(_find_first_nonconda cc gcc clang || true)
   [ -n "$HOST_CXX" ] || HOST_CXX=$(_find_first_nonconda c++ g++ clang++ || true)
+fi
+
+if [ -n "$HOST_LD" ]; then
+  echo "시스템 링커 사용: $HOST_LD"
+  # GCC/nvcc는 PATH에서 ld를 찾으므로, 아래에서 시스템 경로를 우선시한다.
+  # -B를 강제로 주면 GCC의 libgcc/libstdc++ 탐색까지 바뀔 수 있다.
+  LD_FLAGS=""
+  if [ "$OS_NAME" = "Linux" ] && "$HOST_LD" --version 2>/dev/null | grep -qi "GNU ld"; then
+    echo "GNU ld 감지 → -Wl,--as-needed 링커 플래그 추가"
+    LD_FLAGS="-Wl,--as-needed"
+  fi
+  [ -n "$LD_FLAGS" ] && CMAKE_ARGS+=("-DCMAKE_EXE_LINKER_FLAGS=$LD_FLAGS")
+  [ -n "$LD_FLAGS" ] && CMAKE_ARGS+=("-DCMAKE_SHARED_LINKER_FLAGS=$LD_FLAGS")
+  [ -n "$LD_FLAGS" ] && CMAKE_ARGS+=("-DCMAKE_MODULE_LINKER_FLAGS=$LD_FLAGS")
+else
+  echo "Warning: conda가 아닌 시스템 링커를 찾지 못했습니다."
 fi
 
 # 무권한 폴백 1: HIP 용으로 이미 찾아 둔 LLVM 을 호스트 컴파일러로 재사용한다.
@@ -1263,6 +1283,12 @@ fi
 # 조용히 그쪽으로 끌려간다. 단, 사용자가 CC/CXX 를 이미 지정했다면 그 뜻을 존중한다
 # (libstdc++ 불일치 때문에 일부러 conda 툴체인을 지정하는 경우가 있고, 그건 아래
 #  트러블슈팅에서 이 스크립트가 직접 안내하는 방법이기도 하다).
+if [ "${KEEP_CONDA_TOOLCHAIN:-0}" != "1" ] && {
+  case "${CC:-}:${CXX:-}" in *conda*) true ;; *) false ;; esac
+} && { [ "$USE_CUDA" -eq 1 ] || [ "$USE_ROCM" -eq 1 ]; }; then
+  echo "벤더 GPU 빌드에서 conda CC/CXX 자동 주입을 해제하고 시스템 툴체인을 사용합니다."
+  unset CC CXX
+fi
 if [ -z "${CC:-}" ] && [ -z "${CXX:-}" ]; then
   [ -n "$HOST_CC" ] && CMAKE_ARGS+=(-DCMAKE_C_COMPILER="$HOST_CC")
   CMAKE_ARGS+=(-DCMAKE_CXX_COMPILER="$HOST_CXX")
@@ -1290,6 +1316,12 @@ esac
 echo "빌드 프로그램: $GEN_PROG"
 echo "C 컴파일러  : ${HOST_CC:-(cmake 자동 탐색)}"
 echo "C++ 컴파일러: $HOST_CXX"
+
+# conda의 cmake/nvcc는 절대 경로로 사용하되, 그 하위 프로세스가 선택하는
+# binutils와 시스템 런타임은 배포판 쪽을 사용하게 한다. 이 순서가 없으면
+# conda의 ld가 시스템 libc와 섞여 CMake의 첫 링크 테스트부터 실패한다.
+export PATH="/usr/bin:/bin:${PATH}"
+echo "링커 탐색 PATH 우선순위: /usr/bin:/bin"
 
 echo "최종 cmake 인자:"
 printf '  %s\n' "${CMAKE_ARGS[@]}"

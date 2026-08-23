@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
+# 다운로드 선택/검증 로직은 Python판을 단일 기준으로 사용한다.
+# 셸 진입점은 기존 사용법을 유지하면서 두 구현의 동작 차이를 없앤다.
+SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
+exec python3 "$SCRIPT_DIR/download_model.py" "$@"
+
 print() { printf '%s\n' "$*"; }
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -230,6 +235,18 @@ url_basename() {
   _urldecode "${u##*/}"
 }
 
+# Hugging Face 웹페이지(blob) 링크도 실제 파일(resolve) 링크로 변환한다.
+# 사용자가 브라우저 주소창의 링크를 그대로 붙여 넣어도 HTML을 받지 않게 한다.
+normalize_hf_url() {
+  local url="$1"
+  case "$url" in
+    https://huggingface.co/*/blob/*)
+      printf '%s\n' "${url/\/blob\//\/resolve\/}" ;;
+    *)
+      printf '%s\n' "$url" ;;
+  esac
+}
+
 # https://huggingface.co/<owner>/<repo>/... → owner
 hf_owner_from_url() {
   local url="${1%%\?*}" rest
@@ -239,6 +256,15 @@ hf_owner_from_url() {
     datasets/*|spaces/*|models/*) rest="${rest#*/}" ;;
   esac
   case "$rest" in */*) printf '%s' "${rest%%/*}" ;; esac
+}
+
+hf_repo_from_url() {
+  local url="${1%%\?*}" rest
+  case "$url" in https://huggingface.co/*) ;; *) return 0 ;; esac
+  rest="${url#https://huggingface.co/}"
+  case "$rest" in datasets/*|spaces/*|models/*) rest="${rest#*/}" ;; esac
+  rest="${rest#*/}"
+  printf '%s' "${rest%%/*}"
 }
 
 # 파일 이름으로 쓸 수 없는 문자를 _ 로. 앞뒤 구분자도 정리한다.
@@ -259,14 +285,19 @@ _strip_token() {
 
 # 모델 URL → 제안할 이름
 suggest_name() {
-  local url="$1" base stem owner
+  local url="$1" base stem owner repo
   base=$(url_basename "$url")
   stem="${base%.[Gg][Gg][Uu][Ff]}"
   [ -n "$stem" ] || return 0
   owner=$(hf_owner_from_url "$url")
+  repo=$(hf_repo_from_url "$url")
   if [ -n "$owner" ]; then
     stem=$(_strip_token "$stem" "$owner")
     stem="${owner}_${stem}"
+  fi
+  if printf '%s' "$repo" | grep -qiE '(^|[-_.])mtp([-_.]|$)' \
+      && ! printf '%s' "$stem" | grep -qiE '(^|[-_.])mtp([-_.]|$)'; then
+    stem="${stem}-MTP"
   fi
   sanitize_name "$stem"
 }
@@ -288,8 +319,12 @@ read -p "Model GGUF URL: " MODEL_URL
 if [ -z "$MODEL_URL" ]; then
   print "Model GGUF URL is required." >&2; exit 1
 fi
+MODEL_URL=$(normalize_hf_url "$MODEL_URL")
 
 read -p "Projection GGUF URL (leave empty if none): " PROJ_URL
+PROJ_URL=$(normalize_hf_url "$PROJ_URL")
+read -p "MTP GGUF URL (leave empty if none): " MTP_URL
+MTP_URL=$(normalize_hf_url "$MTP_URL")
 
 # [FIX 5] gated 여부는 20GB 를 태우고 나서가 아니라 시작 전에 알아야 한다.
 # 다운로드는 백그라운드 잡으로 도는데, 거기서 토큰을 물어볼 수는 없다(입력이 섞인다).
@@ -322,6 +357,9 @@ if [ -n "$SUGGESTED" ]; then
   print "  모델 파일 : ${SUGGESTED}.gguf"
   if [ -n "$PROJ_URL" ]; then
     print "  프로젝션  : ${SUGGESTED}_$(proj_tag "$(url_basename "$PROJ_URL")").gguf"
+  fi
+  if [ -n "$MTP_URL" ]; then
+    print "  MTP 모델  : ${SUGGESTED}_mtp.gguf"
   fi
   read -p "이 이름을 쓸까요? (Y/n, 또는 원하는 이름을 직접 입력): " ans
   case "$ans" in
@@ -366,13 +404,30 @@ if [ -n "$PROJ_URL" ]; then
   fi
 fi
 
+MTP_DEST=""
+if [ -n "$MTP_URL" ]; then
+  MTP_DEST="$TARGET_DIR/${MODEL_DIR_NAME}_mtp.gguf"
+  if [ -f "$MTP_DEST" ]; then
+    read -p "$MTP_DEST exists. Overwrite? (y/N): " o3
+    o3=${o3:-N}
+    if [[ ! "$o3" =~ ^[Yy]$ ]]; then
+      print "Skipping MTP download (file exists)."; MTP_URL=""; MTP_DEST=""
+    else
+      rm -f "$MTP_DEST"
+    fi
+  fi
+fi
+
 # 다운로드를 시작하기 전에 기대 해시를 미리 받아 둔다. 네트워크 호출이 가볍고,
 # 여기서 받아 두면 백그라운드 잡들과 경쟁하지 않는다.
 MODEL_SHA=$(hf_sha_for_url "$MODEL_URL" || true)
 PROJ_SHA=""
 [ -n "$PROJ_URL" ] && PROJ_SHA=$(hf_sha_for_url "$PROJ_URL" || true)
+MTP_SHA=""
+[ -n "$MTP_URL" ] && MTP_SHA=$(hf_sha_for_url "$MTP_URL" || true)
 [ -n "$MODEL_SHA" ] && print "기대 sha256 (model): $MODEL_SHA"
 [ -n "$PROJ_SHA" ]  && print "기대 sha256 (proj) : $PROJ_SHA"
+[ -n "$MTP_SHA" ]   && print "기대 sha256 (mtp)  : $MTP_SHA"
 
 print "Starting downloads..."
 PIDS=()
@@ -382,6 +437,10 @@ PIDS+=("$!")
 
 if [ -n "$PROJ_URL" ]; then
   download "$PROJ_URL" "$PROJ_DEST" &
+  PIDS+=("$!")
+fi
+if [ -n "$MTP_URL" ]; then
+  download "$MTP_URL" "$MTP_DEST" &
   PIDS+=("$!")
 fi
 
@@ -403,6 +462,7 @@ print ""
 print "── 무결성 검증 ──"
 if ! verify_sha "$MODEL_DEST" "$MODEL_SHA"; then FAIL=1; fi
 if [ -n "$PROJ_DEST" ] && ! verify_sha "$PROJ_DEST" "$PROJ_SHA"; then FAIL=1; fi
+if [ -n "$MTP_DEST" ] && ! verify_sha "$MTP_DEST" "$MTP_SHA"; then FAIL=1; fi
 
 if [ "$FAIL" -ne 0 ]; then
   print "" >&2
