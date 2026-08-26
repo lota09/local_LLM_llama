@@ -6,3 +6,4 @@ trash/
 logs/
 .caddy/
 __pycache__/
+secrets/

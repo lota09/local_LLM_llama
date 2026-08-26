@@ -1,5 +1,12 @@
 #!/usr/bin/env python3
-"""models/<이름>/ 아래로 GGUF 모델과 (선택) mmproj 를 받는다.
+"""models/<이름>/ 아래로 모델을 받는다. 저장소 URL 하나만 주면 갈래는 스스로 정한다.
+
+  safetensors 저장소 → vLLM 용. **저장소 전체**를 받는다 (샤드 + config + 토크나이저).
+                       받기 전에 config.json 만 먼저 읽어 MLX·양자화·크기를 판정한다.
+  GGUF 저장소        → llama.cpp 용. 양자화 수준을 골라 파일 1~3개(본체/mmproj/MTP)를 받는다.
+
+두 갈래가 다운로드·이어받기·재시도·sha256 검증 인프라를 공유한다. 갈래마다 따로
+구현하면 규칙이 어긋난다 — 아래에 적힌 것과 같은 일이 실제로 벌어졌다.
 
 download_model.sh 의 파이썬 판이다. 두 파일은 같은 규칙을 따라야 한다:
 동작이 갈리면 sh 가 기준이다.
@@ -16,6 +23,7 @@ download_model.sh 의 파이썬 판이다. 두 파일은 같은 규칙을 따라
 import concurrent.futures
 import getpass
 import hashlib
+import io
 import json
 import os
 import re
@@ -60,17 +68,86 @@ def is_mtp_name(name):
 #
 # 출처 우선순위: HF_TOKEN → HUGGING_FACE_HUB_TOKEN → huggingface-cli 로그인 파일
 # ─────────────────────────────────────────────────────────────────────────────
-def _resolve_hf_token():
-    for var in ("HF_TOKEN", "HUGGING_FACE_HUB_TOKEN"):
-        if os.environ.get(var):
-            return os.environ[var].strip()
-    path = os.path.join(os.environ.get("HF_HOME") or
-                        os.path.expanduser("~/.cache/huggingface"), "token")
+# 토큰 보관 위치 — 스크립트 옆의 secrets/ 디렉터리.
+#
+# 스크립트 기준(cwd 기준이 아니라)이라 어디서 실행하든 같은 파일을 본다.
+# 이 파일은 vllm/ 과 llamacpp/ 에 하드링크로 공유되므로, 각 프로젝트가
+# 자기 secrets/ 를 갖는다. 양쪽 .gitignore 에 secrets/ 가 들어 있다.
+_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
+HF_TOKEN_DIR = os.path.join(_SCRIPT_DIR, "secrets")
+HF_TOKEN_FILE = os.path.join(HF_TOKEN_DIR, "huggingface_token.json")
+
+
+def _read_token_file(path):
+    """JSON({"token": ...}) 우선, 아니면 평문 한 줄로 읽는다.
+
+    평문도 받는 이유: ~/.cache/huggingface/token (huggingface-cli 가 쓰는 것) 은
+    평문이다. 우리 파일만 JSON 이다.
+    """
     try:
         with open(path) as f:
-            return f.read().strip()
+            raw = f.read().strip()
     except OSError:
         return ""
+    if raw.startswith("{"):
+        try:
+            return (json.loads(raw) or {}).get("token", "").strip()
+        except ValueError:
+            return ""
+    return raw
+
+
+def _token_sources():
+    """토큰을 찾을 자리들. 앞이 우선."""
+    yield ("환경변수 HF_TOKEN", os.environ.get("HF_TOKEN"))
+    yield ("환경변수 HUGGING_FACE_HUB_TOKEN", os.environ.get("HUGGING_FACE_HUB_TOKEN"))
+    yield (HF_TOKEN_FILE, _read_token_file(HF_TOKEN_FILE))
+    hf_home = os.environ.get("HF_HOME") or os.path.expanduser("~/.cache/huggingface")
+    p = os.path.join(hf_home, "token")
+    yield (p, _read_token_file(p))
+
+
+def _resolve_hf_token():
+    for _, tok in _token_sources():
+        if tok:
+            return tok.strip()
+    return ""
+
+
+def _save_hf_token(tok, who=None):
+    """secrets/huggingface_token.json 에 0600 으로 저장. 실패해도 이번 실행은 계속된다."""
+    import datetime
+    body = json.dumps({
+        "token": tok,
+        "user": who,
+        "saved_at": datetime.datetime.now().astimezone().isoformat(timespec="seconds"),
+        "note": "HuggingFace read token. 이 파일은 .gitignore 로 제외됩니다.",
+    }, ensure_ascii=False, indent=1) + "\n"
+    try:
+        os.makedirs(HF_TOKEN_DIR, mode=0o700, exist_ok=True)
+        # exist_ok=True 는 **이미 있는 디렉터리의 권한을 바꾸지 않는다.**
+        # 먼저 만들어져 있었다면 umask 대로 775 인 채로 남는다 (실측).
+        os.chmod(HF_TOKEN_DIR, 0o700)
+        fd = os.open(HF_TOKEN_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(body)
+        os.chmod(HF_TOKEN_FILE, 0o600)
+        return HF_TOKEN_FILE
+    except OSError as e:
+        print(f"  ⚠ 토큰 저장 실패({e}) — 이번 실행에만 사용합니다")
+        return None
+
+
+def _whoami(tok):
+    """토큰이 살아 있는지 확인하고 사용자 이름을 돌려준다. 실패하면 None."""
+    try:
+        req = urllib.request.Request(
+            "https://huggingface.co/api/whoami-v2",
+            headers={"User-Agent": "wget/1.21", "Authorization": f"Bearer {tok}"})
+        with urllib.request.urlopen(req, timeout=15) as r:
+            return (json.load(r) or {}).get("name")
+    except Exception:
+        return None
 
 
 HF_TOKEN = _resolve_hf_token()
@@ -211,9 +288,12 @@ def download(job, max_retries=3):
 
 
 def _render(jobs, width):
+    # 라벨 폭은 고정 7 이 아니라 실제 라벨에 맞춘다. GGUF 갈래는 'model'/'mmproj'/'mtp'
+    # 뿐이라 7 로 충분했지만, safetensors 갈래는 파일명을 그대로 라벨로 쓴다.
+    lw = max(7, max(len(j.label) for j in jobs))
     lines = []
     for j in jobs:
-        head = f"{j.label:<7}"
+        head = f"{j.label:<{lw}}"
         if j.state in ("완료", "실패"):
             mark = "✓" if j.ok else "✗"
             lines.append(f"{head} {mark} {j.state}{('  ' + j.note) if j.note else ''}")
@@ -233,15 +313,22 @@ def _render(jobs, width):
     return [ln[:width] for ln in lines]
 
 
-def run_jobs(jobs):
-    """모든 잡을 동시에 받으면서 잡마다 한 줄씩 진행률을 그린다."""
+def run_jobs(jobs, max_parallel=None):
+    """모든 잡을 동시에 받으면서 잡마다 한 줄씩 진행률을 그린다.
+
+    max_parallel 을 주면 그 수만큼만 동시에 받는다. GGUF 갈래는 파일이 1~3개라
+    전부 동시에 받아도 됐지만, safetensors 저장소는 15개가 넘을 수 있다. 대역폭은
+    그대로인데 연결만 15개로 쪼개면 개별 파일이 전부 느려져서, 하나가 끝나 검증을
+    시작할 수 있는 시점만 늦어진다. 기본값(None)은 예전 동작 그대로다.
+    """
     if not jobs:
         return True
     tty = sys.stdout.isatty()
     drawn = 0
     last_plain = 0.0
 
-    with concurrent.futures.ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+    workers = min(len(jobs), max_parallel) if max_parallel else len(jobs)
+    with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
         futures = [pool.submit(download, j) for j in jobs]
         while True:
             running = not all(f.done() for f in futures)
@@ -561,8 +648,18 @@ def hf_repo_from_input(url):
     return parts[0], parts[1], revision
 
 
-def list_repo_gguf_files(repo_url):
-    """List GGUF files in an HF repository via its public tree API."""
+def list_repo_tree(repo_url):
+    """저장소의 **모든** 파일 목록을 HF 공개 트리 API 로 한 번에 가져온다.
+
+    예전에는 이 함수가 .gguf 만 골라서 돌려줬다(list_repo_gguf_files). 그런데
+    safetensors 저장소는 "가중치 샤드 + config.json + tokenizer* + 채팅 템플릿"을
+    **통째로** 받아야 하므로(§3.1), 확장자로 미리 거르면 갈래를 나눌 수조차 없다.
+    그래서 여기서는 거르지 않고 전부 돌려주고, 무엇을 받을지는 갈래별로 정한다.
+
+    돌려주는 meta 는 {경로: (크기, sha256)}. HF 는 LFS 파일에만 lfs.oid(=sha256)를
+    주므로 작은 설정 파일(config.json 등)은 sha 가 빈 문자열이다 — 검증은 큰 파일에만
+    걸리는데, 조용히 잘려서 문제가 되는 것도 큰 파일뿐이라 실질 손해가 없다.
+    """
     owner, repo, revision = hf_repo_from_input(repo_url)
     if not owner or not repo:
         print("Hugging Face repository URL is invalid.", file=sys.stderr)
@@ -575,14 +672,13 @@ def list_repo_gguf_files(repo_url):
     except Exception as exc:
         print(f"Could not read repository file list: {exc}", file=sys.stderr)
         sys.exit(1)
-    files = [e["path"] for e in entries
-             if e.get("type") == "file" and e.get("path", "").lower().endswith(".gguf")]
+    files = sorted(e["path"] for e in entries if e.get("type") == "file")
     # 크기와 sha256(lfs.oid)을 여기서 같이 챙긴다. 이 한 번의 응답에 다 들어 있으므로
     # 파일마다 API 를 또 부를 이유가 없고, 크기를 알면 '이미 다 받았는지 / 어디까지
     # 받다 말았는지' 를 사람에게 묻지 않고 판단할 수 있다.
     meta = {e["path"]: (e.get("size") or 0, (e.get("lfs") or {}).get("oid", "") or "")
             for e in entries if e.get("type") == "file"}
-    return owner, repo, revision, sorted(files), meta
+    return owner, repo, revision, files, meta
 
 
 def hf_file_url(owner, repo, revision, path):
@@ -607,12 +703,956 @@ def choose_file(label, files):
         print("올바른 번호를 선택하세요.")
 
 
-def main():
-    repo_url = prompt("Hugging Face model repository URL: ")
-    if not repo_url:
-        print("Repository URL is required.", file=sys.stderr)
+# ═════════════════════════════════════════════════════════════════════════════
+# safetensors 저장소 갈래 (vLLM 용)
+#
+# GGUF 갈래와 근본적으로 다른 점이 넷이다:
+#
+#   ① 받는 단위가 '파일'이 아니라 '저장소 전체'다.
+#      GGUF 는 한 파일에 가중치·토크나이저·채팅템플릿이 다 들어있다. safetensors 는
+#      텐서만 들고 나머지는 옆의 JSON 들이 나눠 갖는다. 그래서 고를 게 없고,
+#      대신 무엇을 빼야 하는지(§파일 필터)가 중요해진다.
+#
+#   ② 양자화를 고를 수 없다.
+#      GGUF 저장소는 한 곳에 Q4_K_M / Q6_K / Q8_0 가 나란히 있어서 파일을 고르지만,
+#      HF 는 AWQ / GPTQ 가 아예 **다른 저장소**다. 저장소를 고른 시점에 양자화가
+#      이미 정해져 있다. 그래서 choose_file 같은 UI 가 설 자리가 없다.
+#
+#   ③ 프로젝션 모델(mmproj)을 따로 받지 않는다.
+#      비전 타워와 프로젝터가 같은 샤드 안에 들어 있다. preprocessor_config.json 이
+#      있으면 그 저장소는 VLM 이고, vLLM 은 아무것도 추가로 지정하지 않아도 올린다.
+#
+#   ④ 실패의 대가가 다르다. ← 이게 설계를 지배한다
+#      GGUF 는 커도 llama.cpp 의 -ngl 로 일부만 GPU 에 올릴 수 있으니 "일단 받아보고
+#      맞춘다"가 가능했다. vLLM 에는 그 손잡이가 사실상 없다(--cpu-offload-gb 는
+#      존재하지만 매 forward 마다 가중치를 PCIe 로 실어 나르는 방식이라 이 박스의
+#      Gen2 x4 에서는 쓸 물건이 아니다). 안 들어가면 받은 30GB 가 그냥 낭비다.
+#      → 그래서 가중치를 1바이트도 받기 전에 config.json(1KB)만 먼저 읽고 판정한다.
+# ═════════════════════════════════════════════════════════════════════════════
+
+WEIGHT_EXTS = (".safetensors", ".bin", ".pth", ".pt")
+
+# 받지 않을 것. 안 거르면 다운로드가 2배가 되는데, 어느 쪽도 vLLM 이 쓰지 않는다.
+EXCLUDE_SUFFIX = (
+    ".gguf",            # llama.cpp 용
+    ".onnx", ".onnx_data",
+    ".msgpack",         # Flax
+    ".h5", ".ckpt",     # TensorFlow / 구 체크포인트
+    ".md", ".png", ".jpg", ".jpeg", ".gif", ".svg", ".pdf",
+    ".gitattributes",
+)
+# 원본 체크포인트 디렉터리. safetensors 와 같은 가중치를 한 벌 더 들고 있다.
+EXCLUDE_DIR_PREFIX = ("original/", "originals/")
+
+
+def _fetch_json(url, timeout=20, want_status=False):
+    """작은 JSON 하나를 받아 dict 로. 실패하면 None (판정 불가로 처리).
+
+    want_status=True 면 (dict|None, HTTP 상태코드|None) 을 돌려준다.
+    401/403 을 그냥 None 으로 뭉개면 **gated 인지 없는 저장소인지 구분할 수 없고**,
+    그래서 "토큰을 넣으면 풀린다" 는 안내를 못 하게 된다 (실측: orcarouter/… 는
+    저장소 API 는 200 인데 config.json 만 401 이었다).
+    """
+    code = None
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "wget/1.21",
+                                                   **_auth_header()})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            data = json.load(r)
+            return (data, r.status) if want_status else data
+    except urllib.error.HTTPError as e:
+        code = e.code
+    except Exception:
+        pass
+    return (None, code) if want_status else None
+
+
+def prompt_hf_token(reason=""):
+    """gated 저장소를 만났을 때 토큰을 받아 전역에 반영한다. 성공하면 True.
+
+    저장 위치는 HF_TOKEN_FILE(~/.config/huggingface/token). 이미 거기 있으면
+    애초에 여기까지 오지 않는다 — _resolve_hf_token() 이 먼저 읽는다.
+    """
+    global HF_TOKEN
+    if not sys.stdin.isatty():
+        print("  (비대화형 — 토큰을 물어볼 수 없습니다. HF_TOKEN=hf_xxx 로 주세요)")
+        return False
+    print("")
+    print("⛔ 이 저장소는 로그인/약관 동의가 필요한 gated 저장소입니다."
+          + (f" ({reason})" if reason else ""))
+    print("   1) HF 웹에서 해당 모델 페이지의 약관에 동의했는지 먼저 확인하세요.")
+    print("   2) 토큰 발급: https://huggingface.co/settings/tokens  (read 권한이면 충분)")
+    print(f"   찾아본 자리: " + ", ".join(where for where, _ in _token_sources()))
+    tok = getpass.getpass("   토큰을 붙여넣으세요 (그냥 Enter 면 건너뜀): ").strip()
+    if not tok:
+        return False
+    who = _whoami(tok)
+    if not who:
+        print("  ⛔ 토큰이 유효하지 않거나 만료되었습니다.")
+        return False
+    HF_TOKEN = tok
+    saved = _save_hf_token(tok, who)
+    print(f"  ✓ 인증됨: {who}" + (f" · 저장: {saved} (0600)" if saved else ""))
+    return True
+
+
+def detect_repo_kind(files):
+    """저장소가 어느 갈래인지. 사용자가 미리 알 필요가 없게 스스로 판정한다."""
+    low = [f.lower() for f in files]
+    has_st = any(f.endswith(".safetensors") for f in low)
+    has_gguf = any(f.endswith(".gguf") for f in low)
+    if has_st and has_gguf:
+        return "both"
+    if has_st:
+        return "safetensors"
+    if has_gguf:
+        return "gguf"
+    # safetensors 이전 형식만 올라온 저장소도 있다. vLLM 은 이것도 읽는다.
+    if any(f.endswith((".bin", ".pth")) for f in low):
+        return "safetensors"
+    return "unknown"
+
+
+def _gpu_total_mib():
+    """이 머신의 VRAM(MiB). nvidia-smi 가 없으면 0 — 판정을 건너뛴다.
+
+    다운로드는 GPU 가 없는 곳에서 돌릴 수도 있으므로 실패를 오류로 만들지 않는다.
+    """
+    if not shutil.which("nvidia-smi"):
+        return 0
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=memory.total", "--format=csv,noheader,nounits"],
+            capture_output=True, text=True, timeout=15)
+        if out.returncode == 0:
+            return int(out.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        pass
+    return 0
+
+
+def _gpu_compute_cap():
+    """이 GPU 의 compute capability(예: 8.0). 알 수 없으면 0.0.
+
+    fp8 판정에 필요하다. fp8 은 '지원되냐'가 아니라 '텐서코어가 있냐'의 문제라서
+    카드 세대를 봐야 정확한 답이 나온다 — SM80(A100/GA100)에는 fp8 연산기가 없어서
+    fp8 가중치를 써도 이득이 0 이지만, SM89(Ada)/SM90(Hopper) 부터는 이득이 크다.
+    """
+    if not shutil.which("nvidia-smi"):
+        return 0.0
+    try:
+        out = subprocess.run(
+            ["nvidia-smi", "--query-gpu=compute_cap", "--format=csv,noheader"],
+            capture_output=True, text=True, timeout=15)
+        if out.returncode == 0:
+            return float(out.stdout.strip().splitlines()[0].strip())
+    except Exception:
+        pass
+    return 0.0
+
+
+def _float_quant_bits(method, qc, repo):
+    """부동소수점 양자화면 그 비트 폭(4 또는 8), 아니면 None.
+
+    quant_method 만 봐서는 알 수 없다. 'compressed-tensors' 도 'modelopt' 도 포맷
+    이름일 뿐이고 그 안에 int4 도 int8 도 fp8 도 fp4 도 들어갈 수 있다. 실측한 두 사례:
+
+      RedHatAI/…-FP8          quant_method='compressed-tensors', weights={type:float, num_bits:8}
+      Blackfrost-AI/…-NVFP4   quant_method='modelopt',           weights={type:float, num_bits:4}
+
+    포맷 이름만 보면 앞의 것은 '◎ 1순위', 뒤의 것은 '△ 대개 fp8 계열' 이라고 찍힌다.
+    둘 다 틀렸다 — 이 카드(SM80)에서 앞은 이득 0 이고 뒤는 아예 못 돈다. 그래서
+    config_groups 안의 실제 타입과 비트 폭을 본다.
+    """
+    # ★ modelopt 은 config_groups 를 갖고 있어도 그게 전부가 아니다.
+    #   ornith-ai/Ornith-1.5-35B-A3B-NVFP4 의 config_groups 는 **어텐션만**(fp8)
+    #   설명하고, 본체인 전문가 291개는 quantized_layers 에 W4A16_NVFP4 로 있다.
+    #   config_groups 만 보면 fp8 이라고 오판한다 — 실제 크기(36B → 21.8 GiB,
+    #   파라미터당 0.6 byte)가 4bit 임을 말해준다. 폴백 경로를 정하는 것은
+    #   가장 좁은 폭이므로 그걸 취한다.
+    if "modelopt" in (method or "").lower():
+        widths = set()
+        algos = [qc.get("quant_algo")] + [
+            (v or {}).get("quant_algo") for v in (qc.get("quantized_layers") or {}).values()]
+        for a in algos:
+            if not isinstance(a, str):
+                continue
+            m = re.search(r"W(\d+)A\d+", a)
+            if m:
+                widths.add(int(m.group(1)))
+            elif a.upper() == "FP8":
+                widths.add(8)
+            elif "FP4" in a.upper():
+                widths.add(4)
+        widths &= {4, 8}
+        if widths:
+            return min(widths)
+
+    # ★ config_groups 가 여러 개면 첫 번째만 보면 안 된다. 실측:
+    #   orcarouter/Qwen3.8-27B-Uncensored-NVFP4 는
+    #     group_0 = 어텐션 float8, group_1 = MLP float4(g16)
+    #   본체는 MLP 쪽인데 group_0 만 읽어 'fp8' 이라 오판했다 (이름은 NVFP4).
+    #   폴백 경로를 정하는 것도 가장 좁은 폭이므로 min 을 취한다.
+    fb = {w.get("num_bits") for w in
+          ((g or {}).get("weights") or {} for g in (qc.get("config_groups") or {}).values())
+          if str(w.get("type", "")).lower() == "float"} & {4, 8}
+    if fb:
+        return min(fb)
+    # config_groups 가 없는 형식은 이름으로 판단한다.
+    if "fp8" in method or re.search(r"(^|[-_.])fp8", repo, re.IGNORECASE):
+        return 8
+    if "fp4" in method or re.search(r"(^|[-_.])(nv)?fp4|mxfp4", repo, re.IGNORECASE):
+        return 4
+    return None
+
+
+def _activation_quant(method, qc):
+    """A축(활성화) 양자화를 판정한다. (설명문, 이 카드에서 막히는가)
+
+    **저장소 이름은 W축만 말한다.** `-NVFP4` 는 가중치가 fp4 라는 뜻일 뿐
+    활성화까지 fp4 라는 뜻이 아니다. 실제로 modelopt 의 `W4A16_NVFP4` 는
+    이름에 NVFP4 가 박혀 있어도 활성화는 fp16 이다.
+
+    ★ 어느 키를 읽을지는 **quant_method 가 정한다.** 둘 다 들어 있는 저장소가
+      실재하기 때문이다 — ornith-ai/Ornith-1.5-35B-A3B-NVFP4 는 config_groups
+      (어텐션 fp8) 와 quantized_layers (전문가 W4A16_NVFP4) 를 동시에 갖는다.
+      vLLM 은 quant_method 로 어느 Config 클래스를 쓸지 고르므로 그쪽을 따라야 한다.
+
+      compressed-tensors → config_groups[*].input_activations
+      modelopt           → quant_algo / quantized_layers[*].quant_algo
+
+    ★ **A축 때문에 기동이 막히는 조합은 (아는 한) 없다.** 텐서코어가 없으면
+      vLLM 이 가중치 전용 스킴으로 내려간다 — fp8 → W8A16Fp8, fp4 → Marlin.
+      활성화 양자화 스펙은 로딩 후 무시된다. 그래서 A축은 "피해야 할 것" 이 아니라
+      **"이 카드에서는 이득이 없는 것"** 이다. (한때 fp8 활성화를 '거부' 로 판정했는데
+      min_capability 를 오독한 것이었다 — 그 값은 error=False 탐지용이다.)
+    """
+    m = (method or "").lower()
+
+    def _fmt_act(bits, typ):
+        """활성화 (비트, 타입) → 이 카드 기준 설명."""
+        if typ == "int" and bits == 8:
+            return "int8 — ✓ SM80 에 int8 텐서코어가 있어 **실제 프리필 이득**이 납니다", False
+        if typ == "float" and bits == 4:
+            return ("fp4 — SM80 에 fp4 텐서코어가 없어 Marlin 가중치 전용으로 폴백합니다. "
+                    "활성화는 fp16 으로 계산되며 연산 이득은 없습니다 (기동은 가능)"), False
+        if typ == "float" and bits == 8:
+            return "fp8 — SM80 에 fp8 텐서코어가 없음. 연산 이득 없음 (기동은 가능)", False
+        return f"{typ}{bits} — Marlin 폴백 (연산 이득 없음)", False
+
+    if "modelopt" in m:
+        # ★ modelopt 은 세 자리에 흩어져 있다. 저장소마다 쓰는 자리가 다르다 (전부 실측):
+        #   quantized_layers[*].quant_algo   "W4A16_NVFP4"  → 이름에 A 폭이 박힘  (Ornith)
+        #   config_groups[*].input_activations {num_bits:4,type:float} → A4      (llmfan46 gemma-4)
+        #   quant_algo                       "NVFP4"        → 폭 정보 없음
+        # quant_algo 만 보면 세 번째 경우에 아무것도 못 말한다.
+        algos = [qc.get("quant_algo")] + [
+            (v or {}).get("quant_algo") for v in (qc.get("quantized_layers") or {}).values()]
+        algos = [a for a in algos if isinstance(a, str)]
+        wa = sorted({int(x.group(2)) for x in
+                     (re.search(r"W(\d+)A(\d+)", a) for a in algos) if x})
+        parts = []
+        if wa:
+            parts.append(f"A{'/'.join(map(str, wa))}"
+                         + (" (fp16 — 이름이 NVFP4 여도 활성화는 16bit)" if wa == [16] else ""))
+        for group in (qc.get("config_groups") or {}).values():
+            a = (group or {}).get("input_activations")
+            if a:
+                d, _ = _fmt_act(a.get("num_bits"), str(a.get("type", "")).lower())
+                gs = a.get("group_size")
+                parts.append(d + (f" · group {gs}" if gs else ""))
+                break
+        if any(a.upper() == "FP8" for a in algos):
+            parts.append("일부 층 FP8 (modelopt 은 min capability 80 이라 통과, 연산 이득 없음)")
+        if not parts:
+            return ("판정 불가 — 설정에 활성화 정보가 없습니다 "
+                    f"(quant_algo={qc.get('quant_algo')!r}). 기동 여부는 받아봐야 압니다"), False
+        return " · ".join(parts), False
+
+    acts = []
+    for group in (qc.get("config_groups") or {}).values():
+        a = (group or {}).get("input_activations")
+        if a:
+            t = (a.get("num_bits"), str(a.get("type", "")).lower())
+            if t not in acts:
+                acts.append(t)
+    if not acts:
+        return ("없음 (weight-only) — SM80 에서 손해 없음"
+                if (qc.get("config_groups") or {}) else None), False
+    if len(acts) > 1:
+        # 층마다 다른 폭을 쓴다. 하나만 말하면 오해를 부른다.
+        return (" · ".join(f"{t}{b}" for b, t in acts)
+                + " (층별로 다름) — 전부 가중치 전용으로 폴백, 연산 이득 없음"), False
+    bits, typ = acts[0]
+    if typ == "float" and bits == 8:
+        # ⚠ 한때 여기서 '거부' 로 판정해 다운로드를 막았다. **틀렸다.**
+        #   CompressedTensorsW8A8Fp8.get_min_capability() 가 89 인 것은 사실이지만,
+        #   그 값은 _check_scheme_supported(..., error=False) 로 **탐지에만** 쓰이고
+        #   실패하면 CompressedTensorsW8A16Fp8 로 내려간다. vLLM 소스 주석 그대로:
+        #     "input_quant will be present for converted models;
+        #      will be ignored during inference post loading"
+        #   즉 NVFP4 와 똑같이 폴백한다.
+        return ("fp8 — SM80 에 fp8 텐서코어가 없어 W8A16Fp8(가중치 전용)로 폴백합니다. "
+                "활성화 양자화는 무시되고 fp16 으로 계산됩니다 (기동 가능, 연산 이득 없음)"), False
+    return _fmt_act(bits, typ)
+
+
+# 부동소수점 양자화가 '연산 이득'을 내려면 그 폭의 텐서코어가 있어야 한다.
+# 없으면 VRAM 만 줄고 속도는 그대로거나(fp8) 아예 커널이 없다(fp4).
+FLOAT_QUANT_MIN_CAP = {8: 8.9, 4: 10.0}      # fp8 → SM89(Ada), fp4 → SM100(Blackwell)
+FLOAT_QUANT_GEN = {8: "SM89(Ada)/SM90(Hopper)", 4: "SM100(Blackwell)"}
+
+
+def _looks_like_mlx(owner, repo, config):
+    """MLX(Apple Silicon 전용) 배포인가.
+
+    확장자가 .safetensors 인 것은 맞지만 그 안의 양자화 규약이 MLX 고유다.
+    safetensors 는 컨테이너일 뿐이고 내용물의 규약은 별개다 — .gguf 라고 전부
+    llama.cpp 가 읽는 게 아닌 것과 같다. vLLM 도 PyTorch 도 못 읽는다.
+
+    판정 근거 둘:
+      - 이름: mlx-community/* 또는 저장소 이름에 MLX
+      - config.json: MLX 는 최상위 "quantization": {"group_size":…, "bits":…} 를 쓴다.
+        HF 진영은 "quantization_config" 를 쓰므로 키 이름으로 갈린다.
+    """
+    if owner.lower() == "mlx-community":
+        return True
+    if re.search(r"(^|[-_.])mlx([-_.]|$)", repo, re.IGNORECASE):
+        return True
+    if isinstance(config, dict):
+        q = config.get("quantization")
+        if isinstance(q, dict) and "bits" in q and "quantization_config" not in config:
+            return True
+    return False
+
+
+# quant_method → (판정 기호, 설명). SM80(Ampere) 기준이다.
+QUANT_VERDICT = {
+    "awq":                 ("◎", "AWQ w4a16 — Marlin 커널. SM80 1순위"),
+    "gptq":                ("◎", "GPTQ w4a16/w8a16 — Marlin 커널"),
+    "gptq_marlin":         ("◎", "GPTQ (Marlin)"),
+    "awq_marlin":          ("◎", "AWQ (Marlin)"),
+    "compressed-tensors":  ("◎", "compressed-tensors — vLLM 진영 표준"),
+    "marlin":              ("◎", "Marlin"),
+    "fp8":                 ("△", "fp8 — SM89(Ada) 이상에만 텐서코어가 있다"),
+    "modelopt":            ("△", "ModelOpt(fp8 또는 fp4)"),
+    "modelopt_fp4":        ("△", "fp4 — SM100(Blackwell) 미만은 Marlin 가중치 전용으로 폴백"),
+    "mxfp4":               ("△", "MXFP4 — SM100 미만은 Marlin 가중치 전용으로 폴백"),
+    "bitsandbytes":        ("△", "bitsandbytes — 동작하지만 느리다"),
+    "aqlm":                ("△", "AQLM"),
+    "gguf":                ("△", "GGUF — vLLM 지원은 실험적. llama.cpp 로 쓰는 편이 낫다"),
+    "torchao":             ("△", "torchao"),
+}
+
+
+def gate_repo(owner, repo, revision, files, meta):
+    """가중치를 받기 전에 이 저장소가 이 박스에서 쓸 수 있는지 판정한다.
+
+    돌려주는 값: (계속할까 bool, config dict 또는 None)
+
+    GGUF 갈래에는 이 단계가 없다. 있을 이유도 없었다 — 부분 오프로드가 있으니
+    일단 받아서 -ngl 로 맞추면 됐다. 여기서는 안 들어가면 그냥 못 쓴다.
+    """
+    print("")
+    print("── 저장소 판정 ──")
+    print(f"  {owner}/{repo}  (revision: {revision})")
+
+    cfg_url = hf_file_url(owner, repo, revision, "config.json")
+    config, code = _fetch_json(cfg_url, want_status=True)
+    if config is None and code in (401, 403):
+        # gated 다. 없는 저장소가 아니라 **토큰만 있으면 풀리는** 상태이므로
+        # 판정을 포기하지 말고 여기서 인증한다. 20GB 를 받은 뒤가 아니라 지금이다.
+        if prompt_hf_token(f"config.json → HTTP {code}"):
+            config, code = _fetch_json(cfg_url, want_status=True)
+            if config is not None:
+                # 파일 목록도 토큰 없이 받은 것이라 비어 있을 수 있다. 다시 읽는다.
+                try:
+                    _, _, _, files2, meta2 = list_repo_tree(
+                        f"https://huggingface.co/{owner}/{repo}/tree/{revision}")
+                    if files2:
+                        files, meta = files2, meta2
+                except Exception:
+                    pass
+            else:
+                print(f"  ⚠ 인증 후에도 config.json 을 읽지 못했습니다 (HTTP {code}).")
+                print("     모델 페이지에서 약관 동의를 마쳤는지 확인하세요.")
+    if config is None:
+        why = ("gated — 약관 동의 또는 토큰 필요" if code in (401, 403)
+               else f"HTTP {code}" if code else "없는 저장소이거나 네트워크 오류")
+        print(f"  ⚠ config.json 을 읽지 못했습니다 ({why}).")
+        print("     판정 없이 진행하면 다 받은 뒤에야 문제를 알게 될 수 있습니다.")
+        return (prompt("     그래도 계속할까요? (y/N): ") or "N").lower().startswith("y"), None
+
+    blocking = []      # 이게 있으면 기본값이 '중단'
+    notes = []
+
+    # ── MLX (문서 §3.3 함정 1위) ──
+    is_mlx = _looks_like_mlx(owner, repo, config)
+    if is_mlx:
+        blocking.append("MLX(Apple Silicon 전용) 배포입니다. NVIDIA GPU 와 무관하며 "
+                        "vLLM 도 PyTorch 도 읽지 못합니다.")
+
+    # ── 아키텍처 ──
+    archs = config.get("architectures") or []
+    if archs:
+        print(f"  아키텍처   : {', '.join(archs)}")
+    # vLLM 지원 여부는 여기서 단정하지 않는다. 확인하려면 vllm 을 import 해야 하는데
+    # (수 초) 이 스크립트는 venv 밖에서도 돌아야 한다. 못 읽으면 기동 시점에 명확한
+    # 오류가 나므로, 아는 척하지 않고 그대로 보여주기만 한다.
+
+    # ── 양자화 ──
+    qc = config.get("quantization_config") or {}
+    method = (qc.get("quant_method") or "").lower()
+    if is_mlx:
+        # MLX 는 quantization_config 대신 최상위 quantization 을 쓴다. 그걸 안 보고
+        # "양자화 없음 = 원본 bf16" 이라고 찍으면 정반대로 안내하게 된다.
+        mq = config.get("quantization") if isinstance(config.get("quantization"), dict) else {}
+        bits = mq.get("bits")
+        print(f"  양자화     : ✗ MLX 고유 양자화{f' ({bits}bit)' if bits else ''} — "
+              f"safetensors 컨테이너일 뿐 내용물 규약이 다릅니다")
+    elif method:
+        mark, desc = QUANT_VERDICT.get(method, ("?", "vLLM 지원 여부 미상"))
+        bits = qc.get("bits") or qc.get("weight_bits")
+        fbits = _float_quant_bits(method, qc, repo)
+        if fbits:
+            # 포맷 이름이 아니라 실제 가중치 타입이다. 판정은 이 카드 기준으로 한다.
+            bits = fbits
+            cap = _gpu_compute_cap()
+            need = FLOAT_QUANT_MIN_CAP[fbits]
+            gen = FLOAT_QUANT_GEN[fbits]
+            if cap and cap >= need:
+                mark, desc = "◎", f"fp{fbits} 가중치 — SM{cap * 10:.0f} 에 fp{fbits} 텐서코어가 있습니다"
+            elif cap:
+                # 못 도는 게 아니다. vLLM 이 Marlin 가중치 전용 경로로 자동 폴백한다
+                # (실측: SM80 에서 MarlinNvFp4LinearKernel.is_supported() == True,
+                #  fp8 도 w8a8 이 안 되면 w8a16 스킴으로 내려간다).
+                # 가중치를 fp16 으로 역양자화해 일반 텐서코어로 계산하므로
+                # VRAM·대역폭은 줄지만 연산 이득은 없고, 프리필처럼 연산이 무거운
+                # 구간은 오히려 느려질 수 있다 — vLLM 자신이 그렇게 경고를 찍는다.
+                mark = "△"
+                desc = (f"fp{fbits} 가중치 — 이 GPU(SM{cap * 10:.0f})에 fp{fbits} 텐서코어가 없어 "
+                        f"Marlin 가중치 전용으로 폴백합니다. VRAM·대역폭만 이득, "
+                        f"연산 이득은 없음 ({gen} 부터 네이티브)")
+            else:
+                mark = "△"
+                desc = f"fp{fbits} 가중치 — {gen} 미만에서는 Marlin 가중치 전용으로 폴백합니다"
+            method = f"{method} → fp{fbits}"
+        print(f"  양자화     : {mark} {method}{f' ({bits}bit)' if bits else ''} — {desc}")
+        # ★ W축과 A축은 별개다. 저장소 이름은 W축만 말한다.
+        kern = "Marlin 가중치 전용 경로" if mark == "△" else "SM80 네이티브"
+        if "modelopt" in method.lower():
+            ql = qc.get("quantized_layers") or {}
+            cnt = {}
+            for v in ql.values():
+                a = (v or {}).get("quant_algo")
+                if a:
+                    cnt[a] = cnt.get(a, 0) + 1
+            mix = " · ".join(f"{a} {n}층" for a, n in
+                             sorted(cnt.items(), key=lambda x: -x[1]))
+            if not mix:
+                wg = next(iter((qc.get("config_groups") or {}).values()), None)
+                w = (wg or {}).get("weights") or {}
+                if w:
+                    mix = (f"{w.get('type','')}{w.get('num_bits','')}"
+                           + (f" · group {w.get('group_size')}" if w.get("group_size") else ""))
+                else:
+                    mix = str(qc.get("quant_algo") or method)
+            print(f"  W축(가중치): {mix} — {kern}")
+        else:
+            seen = []
+            for g in (qc.get("config_groups") or {}).values():
+                w = (g or {}).get("weights") or {}
+                lab = (f"{w.get('type','')}{w.get('num_bits','')}"
+                       + (f" g{w.get('group_size')}" if w.get("group_size") else ""))
+                if lab.strip() and lab not in seen:
+                    seen.append(lab)
+            if not seen and bits:
+                seen = [str(bits) + "bit"]
+            if seen:
+                print(f"  W축(가중치): {' · '.join(seen)}"
+                      + (" (층별로 다름)" if len(seen) > 1 else "") + f" — {kern}")
+        adesc, ablock = _activation_quant(method, qc)
+        if adesc:
+            print(f"  A축(활성화): {'⛔' if ablock else '  '} {adesc}")
+        if ablock:
+            blocking.append(f"활성화: {adesc}")
+        if mark == "✗":
+            blocking.append(f"양자화 {method}: {desc}. vLLM 이 커널을 찾지 못해 기동에 실패합니다.")
+        elif mark == "△":
+            notes.append(f"양자화 {method}: {desc}")
+    else:
+        dt = _model_dtype(config) or "미상"
+        bits = {"float32": 32, "bfloat16": 16, "float16": 16}.get(dt)
+        print(f"  양자화     : ○ 없음 (원본 {dt}) — 크기만 맞으면 품질은 최상")
+        print(f"  W축(가중치): 양자화 안 됨 — {dt}"
+              + (f" ({bits}bit, 파라미터당 {bits // 8} byte)" if bits else ""))
+        print("  A축(활성화): 양자화 안 됨 — fp16/bf16 그대로 계산")
+
+    # ── 멀티모달 ──
+    fset = set(files)
+    if "preprocessor_config.json" in fset or "video_preprocessor_config.json" in fset:
+        kinds = []
+        if "preprocessor_config.json" in fset:
+            kinds.append("이미지")
+        if "video_preprocessor_config.json" in fset:
+            kinds.append("영상")
+        print(f"  멀티모달   : ● VLM ({'/'.join(kinds)} 입력). 비전 타워가 같은 샤드 안에 "
+              f"있으므로 mmproj 를 따로 받지 않습니다")
+
+    # ── 채팅 템플릿 ──
+    if "chat_template.jinja" in fset:
+        print("  채팅템플릿 : ● chat_template.jinja")
+    else:
+        print("  채팅템플릿 : ○ 별도 파일 없음 (tokenizer_config.json 안에 있을 수 있음)")
+
+    # ── 원격 코드 ──
+    if config.get("auto_map") or any(f.endswith(".py") for f in files):
+        notes.append("사용자 정의 모델링 코드가 있습니다 — vLLM 기동 시 "
+                     "--trust-remote-code 가 필요할 수 있습니다")
+
+    # ── 크기 vs VRAM ── ★ 이 갈래에만 있는 판정
+    orphans = canonical_shards(owner, repo, revision, files)
+    if orphans:
+        ob = sum(meta.get(f, (0, ""))[0] for f in orphans)
+        print(f"  중복 샤드   : ⚠ index 가 참조하지 않는 샤드 {len(orphans)}개 "
+              f"({_fmt_bytes(ob)}) 를 제외합니다 — 같은 가중치의 옛 판본입니다")
+    keep = filter_repo_files(files, orphans)
+    weight_b = sum(meta.get(f, (0, ""))[0] for f in keep
+                   if f.lower().endswith(WEIGHT_EXTS))
+    total_b = sum(meta.get(f, (0, ""))[0] for f in keep)
+    print(f"  가중치     : {_fmt_bytes(weight_b)}  (받을 파일 {len(keep)}개, "
+          f"합계 {_fmt_bytes(total_b)})")
+
+    vram_mib = _gpu_total_mib()
+    if vram_mib and weight_b:
+        vram_b = vram_mib * 1024 * 1024
+        ratio = weight_b / vram_b
+        print(f"  VRAM       : {_fmt_bytes(vram_b)} 중 가중치가 {ratio * 100:.0f}%")
+        # KV 캐시·활성화·CUDA 컨텍스트가 들어갈 자리가 남아야 한다. 가중치가 85%를
+        # 넘으면 KV 풀이 거의 안 남아 max_model_len 을 의미 있게 잡을 수 없다.
+        if ratio >= 1.0:
+            blocking.append(f"가중치({_fmt_bytes(weight_b)})가 VRAM({_fmt_bytes(vram_b)})보다 "
+                            f"큽니다. vLLM 은 전부 올리지 못하면 기동에 실패합니다.")
+        elif ratio > 0.85:
+            notes.append(f"가중치가 VRAM 의 {ratio * 100:.0f}% 입니다 — KV 캐시가 거의 "
+                         f"남지 않아 컨텍스트를 짧게 잡아야 합니다.")
+    elif not vram_mib:
+        print("  VRAM       : (nvidia-smi 없음 — 크기 판정을 건너뜁니다)")
+
+    for n in notes:
+        print(f"  ⚠ {n}")
+
+    if blocking:
+        print("")
+        sys.stdout.flush()      # 로그로 리다이렉트하면 stderr 가 먼저 나가 순서가 뒤집힌다
+        for b in blocking:
+            print(f"  ⛔ {b}", file=sys.stderr)
+        sys.stderr.flush()
+        print("")
+        return (prompt("  그래도 받을까요? (y/N): ") or "N").lower().startswith("y"), config
+
+    return True, config
+
+
+def _model_dtype(config):
+    """원본 체크포인트의 dtype. **최상위에만 있는 게 아니다.**
+
+    transformers 가 `torch_dtype` → `dtype` 로 이름을 바꿨고, 멀티모달 저장소는
+    그걸 `text_config` / `vision_config` 안으로 내렸다. 최상위만 보면 '?' 가 찍힌다
+    (실측: OBLITERATUS/Qwen3.8-27B-OBLITERATED 는 text_config.dtype == 'bfloat16').
+    """
+    for src in (config, config.get("text_config") or {}, config.get("vision_config") or {}):
+        for k in ("torch_dtype", "dtype"):
+            v = src.get(k)
+            if isinstance(v, str):
+                return v
+    return None
+
+
+def canonical_shards(owner, repo, revision, files):
+    """index 가 참조하지 않는 **고아 safetensors 샤드**를 골라낸다.
+
+    같은 가중치를 서로 다른 샤딩으로 두 벌 올려둔 저장소가 실재한다 — 옛 업로드를
+    지우지 않은 경우다. 실측 사례: OBLITERATUS/Qwen3.8-27B-OBLITERATED 는
+    `model-*-of-00018`(51.7 GiB) 와 `model-*-of-00028`(50.1 GiB) 를 동시에 갖고 있고
+    `model.safetensors.index.json` 은 **00028 쪽만** 가리킨다. 안 거르면 받을 양이
+    103.5 GiB 로 잡혀 "VRAM 보다 크다" 는 잘못된 경고까지 따라온다.
+
+    판단 근거는 하나뿐이다 — **index 의 weight_map 이 정본이다.**
+    index 가 없으면(단일 파일 저장소 등) 아무것도 걸러내지 않는다.
+    """
+    idx = next((f for f in files if f.endswith("model.safetensors.index.json")), None)
+    if not idx:
+        return set()
+    j = _fetch_json(hf_file_url(owner, repo, revision, idx))
+    used = {v for v in (j or {}).get("weight_map", {}).values()}
+    if not used:
+        return set()
+    shards = {f for f in files if f.endswith(".safetensors")}
+    orphans = shards - used
+    # index 가 가리키는 게 하나도 실재하지 않으면 우리가 잘못 읽은 것이다. 건드리지 않는다.
+    return orphans if (shards & used) else set()
+
+
+def filter_repo_files(files, orphans=()):
+    """저장소 파일 목록에서 실제로 받을 것만 남긴다.
+
+    HF 저장소에는 vLLM 이 쓰지 않는 파일이 잔뜩 섞여 있다. 대표적으로 같은 가중치의
+    구 PyTorch 판(*.bin)이 safetensors 와 나란히 올라와 있는 경우가 흔한데, 안 거르면
+    다운로드가 정확히 2배가 된다. GGUF 갈래에는 없던 문제다(파일 하나였으니까).
+    """
+    low_map = {f: f.lower() for f in files}
+    has_st = any(v.endswith(".safetensors") for v in low_map.values())
+    orphans = set(orphans)
+
+    keep = []
+    for f, low in low_map.items():
+        # index 가 참조하지 않는 샤드는 같은 가중치의 옛 판본이다 (canonical_shards 참조)
+        if f in orphans:
+            continue
+        if low.endswith(EXCLUDE_SUFFIX):
+            continue
+        if any(low.startswith(d) for d in EXCLUDE_DIR_PREFIX):
+            continue
+        # safetensors 가 있으면 .bin/.pth 는 같은 가중치의 중복이다. 없으면 그게 본체다.
+        if has_st and low.endswith((".bin", ".pth", ".pt")):
+            continue
+        # 그 .bin 들의 샤드 매니페스트도 같이 빠져야 한다. 안 그러면 존재하지 않는
+        # 파일을 가리키는 index 만 남아, 나중에 무결성을 확인할 때 혼란만 준다.
+        if has_st and low.endswith((".bin.index.json", ".pth.index.json")):
+            continue
+        # consolidated.* 는 Mistral 계열의 원본 한 덩어리 판. 샤드와 중복이다.
+        if os.path.basename(low).startswith("consolidated.") and has_st:
+            continue
+        keep.append(f)
+    return sorted(keep)
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 모델 디렉터리 명명 규칙
+#
+#   <제작자>_<베이스모델>_<특성>_<W축>-<A축>
+#
+#   예) orcarouter_Qwen3.8-27B_AL_NVFP4-FP8
+#       twolven_Qwen3.8-27B_AL-MTP_INT4-BF16
+#
+# 저장소 이름은 제작자마다 제각각이고(-abliterated / -Uncensored / -heretic …),
+# W축만 말하거나(-NVFP4) 아무것도 안 말한다. 그래서 **이름이 아니라 config 를 읽어**
+# 축을 채운다. 특성이 없으면 그 칸은 통째로 뺀다.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# 특성 토큰 — 앞에 있을수록 먼저 표기한다.
+TRAIT_RULES = [
+    ("AL",  r"abliterat|uncensor|heretic|obliterat|ablated|decensor|unalign|unfilter"),
+    ("MTP", r"(^|[-_.])mtp([-_.]|$)"),
+    ("QAT", r"(^|[-_.])qat([-_.]|$)"),
+]
+
+# 이름에서 걷어낼 양자화·잡토큰 (베이스 모델명만 남기기 위해)
+_NAME_NOISE = re.compile(
+    r"(?i)(?:^|[-_.])(?:"
+    r"awq|gptq|nvfp4|mxfp4|fp4|fp8|w4a16|w4a4|w8a8|w8a16|w16a16|int4|int8|"
+    r"4bit|8bit|q4_0|q4_k_m|q8_0|bnb|autoround|quantized|compressed[-_]?tensors|"
+    r"abliterated|uncensored|heretic|obliterated|ablated|decensored|unaligned|"
+    r"unfiltered|mtp|qat|dflash|freetoken|vision|it|ct|instruct|chat|hf|"
+    r"nvfp4a16|fp4a16|int8a16|smoothquant|imatrix|ptq|autoround|huihui|"
+    r"llmcompressor|v?\d+\.\d+\.\d+)(?=[-_.]|$)")
+
+
+def _quant_label(typ, bits, group=None, hint=""):
+    """(타입, 비트) → 표기. fp4 는 group 16 이거나 이름에 nvfp4 면 NVFP4."""
+    typ = (typ or "").lower()
+    if typ in ("bfloat16", "bf16"):
+        return "BF16"
+    if typ in ("float16", "fp16", "half"):
+        return "FP16"
+    if typ == "float32":
+        return "FP32"
+    if typ == "int":
+        return f"INT{bits}"
+    if typ == "float":
+        if bits == 4:
+            if "mxfp4" in hint.lower():
+                return "MXFP4"
+            return "NVFP4" if (group == 16 or "nvfp4" in hint.lower()) else "FP4"
+        return f"FP{bits}"
+    return (typ or "?").upper()
+
+
+def model_axes(qc, config, repo=""):
+    """(W축 표기, A축 표기).
+
+    여러 config_groups 를 쓰는 저장소가 있다 — 어텐션과 MLP 를 다르게 양자화한다.
+    그때의 규칙:
+      W축 = **가장 좁은 폭** (본체가 대개 그쪽이고, 저장소 이름도 그걸 쓴다)
+      A축 = **가장 넓은 폭** (실효 연산 정밀도는 넓은 쪽이 정한다)
+    실측 예) orcarouter/…-NVFP4 : W{float8, float4} A{float8, float4} → NVFP4-FP8
+    """
+    hint = repo
+    groups = list((qc.get("config_groups") or {}).values())
+    ws, as_ = [], []
+    for g in groups:
+        w = (g or {}).get("weights") or {}
+        if w.get("num_bits"):
+            ws.append((w.get("num_bits"), str(w.get("type", "")).lower(), w.get("group_size")))
+        a = (g or {}).get("input_activations")
+        if a and a.get("num_bits"):
+            as_.append((a.get("num_bits"), str(a.get("type", "")).lower(), a.get("group_size")))
+
+    # modelopt: quantized_layers 의 quant_algo 도 본다
+    for v in (qc.get("quantized_layers") or {}).values():
+        alg = (v or {}).get("quant_algo") or ""
+        m = re.search(r"W(\d+)A(\d+)", alg)
+        if m:
+            ws.append((int(m.group(1)), "float" if "FP" in alg.upper() else "int",
+                       (v or {}).get("group_size")))
+            if int(m.group(2)) < 16:
+                as_.append((int(m.group(2)), "float", None))
+        elif alg.upper() == "FP8":
+            ws.append((8, "float", None))
+
+    # ── 고전 AWQ / GPTQ: config_groups 가 없고 최상위에 bits/group_size 가 있다.
+    #    (실측: bowmanslayer/…-W4A16-vision-mtp 는 quant_method=gptq, bits=4.
+    #     이걸 놓치면 18.2 GiB 짜리 4bit 모델이 'BF16' 으로 찍힌다.)
+    if not ws and re.search(r"gptq|awq|autoround", (qc.get("quant_method") or ""), re.I):
+        b = qc.get("bits") or qc.get("w_bit")
+        if b:
+            t = "float" if re.search(r"fp|float", str(qc.get("data_type") or ""), re.I) else "int"
+            ws.append((b, t, qc.get("group_size")))
+
+    # ── modelopt 인데 quant_algo 하나만 있는 경우 (config_groups·quantized_layers 없음)
+    if not ws:
+        alg = str(qc.get("quant_algo") or "")
+        if alg:
+            m = re.search(r"W(\d+)A(\d+)", alg)
+            if m:
+                ws.append((int(m.group(1)), "float" if "FP" in alg.upper() else "int", 16))
+                as_.append((int(m.group(2)), "float", None))
+            elif "NVFP4" in alg.upper():
+                # modelopt 의 맨 'NVFP4' 는 W4A4 를 뜻한다 (실측: llmfan46/… 의
+                # config_groups 가 W float4 / A float4 였고 quant_algo 는 'NVFP4' 였다)
+                ws.append((4, "float", 16)); as_.append((4, "float", 16))
+            elif alg.upper() == "FP8":
+                ws.append((8, "float", None)); as_.append((8, "float", None))
+
+    dt = _model_dtype(config) or "bfloat16"
+    if ws:
+        b, t, g = min(ws, key=lambda x: x[0])           # 가장 좁은 폭
+        wlab = _quant_label(t, b, g, hint)
+    else:
+        wlab = _quant_label(dt, None, None, hint)
+    if as_:
+        b, t, g = max(as_, key=lambda x: x[0])          # 가장 넓은 폭
+        alab = _quant_label(t, b, g, hint)
+    else:
+        alab = _quant_label(dt, None, None, hint)       # 양자화 없음 → 모델 dtype
+    return wlab, alab
+
+
+def model_traits(owner, repo):
+    """저장소 이름에서 특성 토큰을 뽑는다. 예: ['AL', 'MTP']"""
+    hay = f"{owner}/{repo}"
+    return [tag for tag, pat in TRAIT_RULES if re.search(pat, hay, re.I)]
+
+
+def base_model_name(owner, repo):
+    """양자화·특성 토큰을 걷어낸 베이스 모델 이름."""
+    name = _strip_token(repo, owner)
+    prev = None
+    while prev != name:                    # 연속 토큰이 겹칠 수 있어 수렴할 때까지
+        prev = name
+        name = _NAME_NOISE.sub("", name)
+    return re.sub(r"[-_.]{2,}", "-", name).strip("-_. ") or repo
+
+
+def canonical_dirname(owner, repo, qc, config):
+    """<제작자>_<베이스>_<특성>_<W>-<A>"""
+    w, a = model_axes(qc or {}, config or {}, repo)
+    parts = [sanitize_name(owner), base_model_name(owner, repo)]
+    traits = model_traits(owner, repo)
+    if traits:
+        parts.append("-".join(traits))
+    parts.append(f"{w}-{a}")
+    return sanitize_name("_".join(parts))
+
+
+def suggest_repo_dirname(owner, repo):
+    """<제작자>_<저장소>. GGUF 쪽 suggest_name 과 같은 규칙(제작자 중복은 제거)."""
+    return sanitize_name(f"{owner}_{_strip_token(repo, owner)}")
+
+
+def ask_repo_name(owner, repo, qc=None, config=None):
+    """디렉터리 이름을 정한다. config 를 주면 표준 규칙(제작자_베이스_특성_W-A)을 쓴다."""
+    if config is not None:
+        suggested = canonical_dirname(owner, repo, qc or {}, config)
+        legacy = suggest_repo_dirname(owner, repo)
+    else:
+        suggested, legacy = suggest_repo_dirname(owner, repo), None
+    print("")
+    print("저장소에서 뽑은 이름:  <제작자>_<베이스모델>_<특성>_<W축>-<A축>")
+    print(f"  디렉터리 : models/{suggested}/")
+    if legacy and legacy != suggested:
+        print(f"  (저장소 원래 이름: {legacy})")
+    ans = prompt("이 이름을 쓸까요? (Y/n, 또는 원하는 이름을 직접 입력): ")
+    low = ans.lower()
+    if ans == "" or low in ("y", "yes"):
+        return suggested
+    if low not in ("n", "no"):
+        return sanitize_name(ans.rstrip("/"))
+    name = sanitize_name(prompt("디렉터리 이름 (models/<name>/): ").rstrip("/"))
+    if not name:
+        print("디렉터리 이름이 필요합니다.", file=sys.stderr)
         sys.exit(1)
-    owner, repo, revision, gguf_files, meta = list_repo_gguf_files(repo_url)
+    return name
+
+
+def _post_download_report(target_dir, config):
+    """받고 나서야 확인할 수 있는 것들. 다음 단계(툴 콜링)의 입력이 된다."""
+    print("")
+    print("── 받은 저장소 확인 ──")
+
+    # 채팅 템플릿이 도구를 다루는가. 파이프라인의 전제조건이므로 여기서 미리 본다.
+    tmpl = ""
+    jinja = os.path.join(target_dir, "chat_template.jinja")
+    if os.path.isfile(jinja):
+        try:
+            tmpl = io.open(jinja, encoding="utf-8", errors="replace").read()
+        except OSError:
+            pass
+    if not tmpl:
+        tk = os.path.join(target_dir, "tokenizer_config.json")
+        if os.path.isfile(tk):
+            try:
+                with io.open(tk, encoding="utf-8") as f:
+                    t = json.load(f).get("chat_template")
+                tmpl = t if isinstance(t, str) else ""
+            except Exception:
+                pass
+    if tmpl:
+        if re.search(r"\btools?\b", tmpl):
+            print("  툴 콜링   : ● 채팅 템플릿이 tools 를 다룹니다")
+            print("              → --enable-auto-tool-choice --tool-call-parser <X>")
+            print("                파서는 모델 계열에 맞춰야 합니다. 안 맞으면 조용히")
+            print("                텍스트로 새어나옵니다 (파서 결정은 run 쪽이 합니다)")
+        else:
+            print("  툴 콜링   : ○ 채팅 템플릿에 tools 처리가 보이지 않습니다")
+    else:
+        print("  툴 콜링   : ? 채팅 템플릿을 찾지 못했습니다")
+
+    idx = os.path.join(target_dir, "model.safetensors.index.json")
+    if os.path.isfile(idx):
+        try:
+            with io.open(idx, encoding="utf-8") as f:
+                wmap = json.load(f).get("weight_map") or {}
+            shards = sorted(set(wmap.values()))
+            missing = [x for x in shards if not os.path.isfile(os.path.join(target_dir, x))]
+            if missing:
+                print(f"  샤드      : ✗ 매니페스트가 요구하는 {len(missing)}개가 없습니다: "
+                      f"{', '.join(missing[:3])}{' …' if len(missing) > 3 else ''}",
+                      file=sys.stderr)
+                return False
+            print(f"  샤드      : ✓ 매니페스트의 {len(shards)}개 모두 존재")
+        except Exception as exc:
+            print(f"  샤드      : ? 매니페스트를 읽지 못했습니다 ({exc})")
+    return True
+
+
+def main_safetensors(owner, repo, revision, files, meta):
+    """safetensors 저장소를 통째로 받는다 (vLLM 용)."""
+    proceed, config = gate_repo(owner, repo, revision, files, meta)
+    if not proceed:
+        print("중단했습니다.", file=sys.stderr)
+        sys.exit(1)
+
+    keep = filter_repo_files(files, canonical_shards(owner, repo, revision, files))
+    if not keep:
+        print("받을 파일이 없습니다.", file=sys.stderr)
+        sys.exit(1)
+    dropped = len(files) - len(keep)
+
+    # 가중치가 gated 인지는 20GB 를 태우고 나서가 아니라 지금 알아야 한다.
+    first_weight = next((f for f in keep if f.lower().endswith(WEIGHT_EXTS)), keep[0])
+    ensure_token(hf_file_url(owner, repo, revision, first_weight))
+
+    # gate_repo 가 돌려준 config 를 그대로 쓴다 (gated 라 못 읽었으면 None →
+    # ask_repo_name 이 옛 규칙으로 떨어진다).
+    name = ask_repo_name(owner, repo, (config or {}).get("quantization_config"), config)
+    target_dir = os.path.join("models", name)
+    os.makedirs(target_dir, exist_ok=True)
+
+    print("")
+    print(f"── 받을 파일 ({len(keep)}개"
+          f"{f', 제외 {dropped}개' if dropped else ''}) ──")
+    jobs, skipped = [], []
+    for path in keep:
+        total, sha = meta.get(path, (0, ""))
+        dest = os.path.join(target_dir, path)          # 하위 디렉터리 구조를 그대로 유지
+        os.makedirs(os.path.dirname(dest), exist_ok=True)
+        url = hf_file_url(owner, repo, revision, path)
+        job = plan_file(os.path.basename(path)[:28], url, dest, total, sha)
+        if job:
+            jobs.append(job)
+        elif os.path.exists(dest):
+            skipped.append((os.path.basename(path), dest, sha))
+
+    if jobs:
+        print("")
+        # 4개씩. 저장소 하나에 파일이 15개를 넘을 수 있는데 연결만 쪼개면 전부 느려진다.
+        if not run_jobs(jobs, max_parallel=4):
+            print("", file=sys.stderr)
+            print("일부 다운로드가 실패했습니다. 다시 실행하면 받다 만 지점부터 이어받습니다.",
+                  file=sys.stderr)
+            sys.exit(1)
+    else:
+        print("")
+        print("모두 받아져 있습니다 — 받을 것이 없습니다.")
+
+    # ─── 무결성 검증 ───
+    # sha 가 있는 것(=LFS, 즉 큰 가중치 샤드)만 해싱한다. 작은 설정 파일은 HF 가
+    # oid 를 주지 않아 검증할 수 없지만, 어차피 몇 KB 라 의심되면 다시 받으면 된다.
+    to_verify = [(j.label, j.dest, j.sha) for j in jobs]
+    if VERIFY_ALL:
+        to_verify += skipped
+    elif skipped:
+        print("")
+        print(f"(건너뛴 파일 {len(skipped)}개는 크기만 확인했습니다. "
+              f"sha256 까지 보려면 VERIFY_ALL=1 로 실행하세요.)")
+
+    hashable = [t for t in to_verify if t[2]]
+    nohash = len(to_verify) - len(hashable)
+    if hashable:
+        print("")
+        print("── 무결성 검증 ──")
+        bad = False
+        for _label, dest, sha in hashable:
+            if not verify_sha(dest, sha):
+                bad = True
+        if nohash:
+            print(f"  (설정 파일 {nohash}개는 HF 가 sha256 을 제공하지 않아 크기만 확인)")
+        if bad:
+            print("", file=sys.stderr)
+            print("파일이 손상되었습니다. 다시 실행하면 이어받기를 시도합니다.", file=sys.stderr)
+            print(f"그래도 안 되면 지우고 처음부터 받으세요: rm -rf '{target_dir}'", file=sys.stderr)
+            sys.exit(1)
+
+    if not _post_download_report(target_dir, config):
+        sys.exit(1)
+
+    print("")
+    print("완료. 저장 위치:")
+    print(f"  {target_dir}/")
+    # ls 는 fd 1 에 직접 쓴다 — 파이썬 버퍼를 우회하므로, 먼저 비워두지 않으면
+    # 로그로 리다이렉트했을 때 ls 결과가 앞선 출력보다 먼저 나와 순서가 뒤집힌다.
+    sys.stdout.flush()
+    subprocess.call(["ls", "-1sh", target_dir])
+    print("")
+    print("vLLM 은 파일이 아니라 **디렉터리**를 받습니다:")
+    print(f"  ./run_vllm_server.py {target_dir}")
+
+
+def main_gguf(owner, repo, revision, files, meta):
+    """GGUF 저장소 (llama.cpp 용). 예전부터의 갈래 — 동작은 그대로다."""
+    gguf_files = sorted(f for f in files if f.lower().endswith(".gguf"))
     if not gguf_files:
         print("No GGUF files found in the repository.", file=sys.stderr)
         sys.exit(1)
@@ -715,7 +1755,41 @@ def main():
 
     print("")
     print("Downloads complete. Saved to:")
+    # ls 는 fd 1 에 직접 쓴다 — 파이썬 버퍼를 우회하므로, 먼저 비워두지 않으면
+    # 로그로 리다이렉트했을 때 ls 결과가 앞선 출력보다 먼저 나와 순서가 뒤집힌다.
+    sys.stdout.flush()
     subprocess.call(["ls", "-1sh", target_dir])
+
+
+def main():
+    """저장소 URL 하나만 받아서 갈래는 스스로 정한다.
+
+    사용자가 "이건 llama.cpp 용인가 vLLM 용인가" 를 미리 알아야 할 이유가 없다.
+    트리 API 를 한 번 부르면 어느 쪽인지 파일 목록에 이미 답이 있다.
+    """
+    repo_url = sys.argv[1] if len(sys.argv) > 1 else prompt("Hugging Face model repository URL: ")
+    if not repo_url:
+        print("Repository URL is required.", file=sys.stderr)
+        sys.exit(1)
+
+    owner, repo, revision, files, meta = list_repo_tree(repo_url)
+    kind = detect_repo_kind(files)
+
+    if kind == "both":
+        print("")
+        print(f"저장소 {owner}/{repo} 에 두 형식이 다 있습니다.")
+        print("  [1] safetensors — vLLM 용 (저장소 전체를 받습니다)")
+        print("  [2] GGUF        — llama.cpp 용 (파일을 골라 받습니다)")
+        kind = "gguf" if (prompt("번호 선택 [기본값 1]: ") or "1").strip() == "2" else "safetensors"
+
+    if kind == "safetensors":
+        return main_safetensors(owner, repo, revision, files, meta)
+    if kind == "gguf":
+        return main_gguf(owner, repo, revision, files, meta)
+
+    print(f"저장소 {owner}/{repo} 에서 모델 가중치를 찾지 못했습니다 "
+          f"(safetensors 도 GGUF 도 없음).", file=sys.stderr)
+    sys.exit(1)
 
 
 if __name__ == "__main__":
