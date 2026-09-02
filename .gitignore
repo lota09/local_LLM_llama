@@ -7,3 +7,6 @@ logs/
 .caddy/
 __pycache__/
 secrets/
+
+# wget 진행 로그 (download_model.sh 가 남긴다). 3.5MB 짜리가 커밋돼 있었다.
+wget-log*
