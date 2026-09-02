@@ -819,6 +819,41 @@ fi
 
 _check_shards "$MODEL_PATH" || exit 1
 
+# ─── 백엔드가 이 모델의 아키텍처를 아는가 ────────────────────────────────────
+# 설치본마다 llama.cpp 버전이 다르다. 낡은 빌드로 새 아키텍처를 띄우면 가중치를 다
+# 읽은 뒤에야 'unknown model architecture' 로 죽는다(실측 2분 손해). 그래서 GGUF 앞부분의
+# general.architecture 값을 읽어 바이너리 안의 아키텍처 이름 문자열과 대조한다.
+#
+# GGUF 메타데이터는 "키 길이(8) + 키 + 값 타입(4) + 값 길이(8) + 값" 이라, 키 이름 뒤
+# 12 바이트를 건너뛰면 값이 나온다. general.architecture 는 보통 첫 KV 라 1MB 면 닿는다.
+#
+# 판정은 보수적으로 한다: "다른 설치본에는 있는데 지금 것에만 없다" 는 적극적 증거가
+# 있을 때만 막는다. 어디에도 없으면 이 휴리스틱이 틀렸을 수 있으므로 그냥 진행하고
+# llama.cpp 가 직접 말하게 둔다 — 되는 조합을 막는 쪽이 더 나쁘다.
+_model_arch=$(head -c 1048576 "$MODEL_PATH" 2>/dev/null \
+  | LC_ALL=C grep -aoP 'general\.architecture.{12}\K[a-z0-9_]+' 2>/dev/null | head -1)
+_backend_knows() {   # $1: 설치 디렉터리
+  LC_ALL=C grep -qa -F "$_model_arch" "$1"/libllama*.so* "$1"/llama-server 2>/dev/null
+}
+if [ -n "$_model_arch" ] && ! _backend_knows "$SELECTED_DIR"; then
+  _cur_name="?"; _alt=()
+  for i in "${!BACKEND_DIRS[@]}"; do
+    if [ "${BACKEND_DIRS[$i]}" = "$SELECTED_DIR" ]; then _cur_name="${BACKEND_NAMES[$i]}"; continue; fi
+    _backend_knows "${BACKEND_DIRS[$i]}" && _alt+=("${BACKEND_NAMES[$i]}")
+  done
+  if [ ${#_alt[@]} -gt 0 ]; then
+    echo "" >&2
+    echo "Error: 백엔드 '${_cur_name}' 는 이 모델의 아키텍처 '${_model_arch}' 를 모릅니다." >&2
+    echo "       그대로 띄우면 가중치를 다 읽은 뒤 'unknown model architecture' 로 죽습니다." >&2
+    echo "" >&2
+    echo "  아는 백엔드: ${_alt[*]}" >&2
+    echo "  다시 실행  : ./$SCRIPT_NAME --backend ${_alt[0]} -m $MODEL_PATH" >&2
+    exit 1
+  fi
+  echo "⚠️  설치된 어떤 백엔드에서도 아키텍처 '${_model_arch}' 문자열을 못 찾았습니다."
+  echo "    판정이 틀렸을 수 있으니 그대로 진행합니다 (실패하면 로그를 확인하세요)."
+fi
+
 # ─── 디스크 페이징(lazy read) 안전장치 ───────────────────────────────────────
 # llama.cpp 는 세 조건이 **모두** 맞을 때만 텐서를 파일에 남긴다:
 #   ① 아키텍처가 그 텐서에 TENSOR_READ_LAZY 를 달았다 (qwen4exp 의 n-gram 테이블,
