@@ -11,33 +11,107 @@
 # 스크립트 위치로 이동
 cd "$(dirname "$0")"
 
-# ─── 포트 인자 파싱 ───────────────────────────────────────────────────────────
-# 사용법: ./run_llama_server.sh [--port PORT]
-# 기본값: 8080  (외부 접근은 setup_secure_server.sh 의 Caddy HTTPS 를 사용)
-SERVER_PORT=8080
+# ─── 인자 파싱 1단계: 스크립트 전용 플래그만 걷어낸다 ────────────────────────
+# 설계 요약 (자세히는 ./run_llama_server.sh --help)
+#   · 스크립트 전용 플래그 → 여기서 소비한다 (llama.cpp 에 없는 이름들)
+#   · llama.cpp 플래그     → 손대지 않고 넘긴다. 2단계에서 llama-server --help 로 검증
+#   · 둘 다 아닌 것        → 오류 + --help 안내
+#
+# omakase = 스크립트가 알아서 붙여주는 튜닝 플래그 묶음. "가장 낮은 우선순위의
+# 통합 플래그" 로 취급한다: 기본으로 켜져 있고, 사용자가 같은 손잡이를 직접
+# 지정하면 그 항목만 빠진다. 통째로 끄려면 --no-omakase (그러면 전부 직접 지정).
+if [ -z "${BASH_VERSINFO[0]:-}" ] || [ "${BASH_VERSINFO[0]}" -lt 4 ]; then
+  echo "Error: bash 4 이상이 필요합니다 (현재: ${BASH_VERSION:-unknown})." >&2
+  exit 1
+fi
+
+SCRIPT_NAME="$(basename "$0")"
+SERVER_PORT=8080          # --port 를 직접 주면 2단계에서 덮어쓴다
 WANT_BACKEND=""
-_argv=("$@")
-_i=0
-while [[ $_i -lt ${#_argv[@]} ]]; do
-  case "${_argv[$_i]}" in
-    --port)
-      _i=$(( _i + 1 ))
-      SERVER_PORT="${_argv[$_i]}"
-      ;;
-    --port=*)
-      SERVER_PORT="${_argv[$_i]#*=}"
-      ;;
-    --backend)
-      _i=$(( _i + 1 ))
-      WANT_BACKEND="${_argv[$_i]}"
-      ;;
-    --backend=*)
-      WANT_BACKEND="${_argv[$_i]#*=}"
-      ;;
+MODEL_DIR="models"
+DO_LIST=0; DRY_RUN=0; ASSUME_YES=0; OMAKASE=1
+PASS_RAW=()
+
+print_help() {
+  cat <<EOF
+사용법: ./$SCRIPT_NAME [스크립트 플래그] [llama.cpp 플래그 ...]
+
+플래그를 하나도 주지 않으면 백엔드·디바이스·모델·컨텍스트를 대화형으로 고르고
+아래 omakase 를 붙여 실행합니다. llama.cpp 플래그는 이름 그대로 쓰면 되고,
+같은 손잡이를 직접 지정하면 omakase 의 그 항목만 빠집니다.
+
+스크립트 전용 플래그
+  --backend NAME      사용할 설치본 (llama_server_<NAME>). 생략하면 선택
+  --model-dir DIR     모델을 찾을 디렉터리 (기본: models)
+  --omakase           omakase 사용 (기본값이므로 명시용)
+  --no-omakase        omakase 를 통째로 끔 — 필요한 플래그를 직접 다 줘야 합니다
+  -y, --yes           대화형 질문 없이 진행 (TTY 가 없으면 자동 적용)
+  --dry-run           띄우지 않고 최종 명령줄만 출력
+  --list              설치된 백엔드·디바이스·모델을 보여주고 종료
+  -h, --help          이 도움말
+
+omakase — 자동으로 붙는 튜닝 플래그. 같은 플래그를 직접 주면 그쪽이 이깁니다.
+  --port 8080 --host 127.0.0.1    로컬 전용 (외부 공개는 setup_secure_server.sh)
+  -ngl 99                         전 계층 GPU
+  -fa on                          flash attention
+  -ctk/-ctv \$KV_TYPE (기본 q8_0)  Vulkan q4_0 절벽 회피 + f16 대비 VRAM 절반
+  --parallel \$PARALLEL (기본 1)   Vulkan 에서 2 이상은 생성속도가 10배 떨어짐
+  --reasoning on --tools all
+  --ui-mcp-proxy                  끄려면 --no-ui-mcp-proxy (llama.cpp 자체 플래그)
+  --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1
+  --repeat-last-n 256
+
+선택·계산 결과 (omakase 와 무관하게 항상 붙음. 직접 주면 그 값을 씁니다)
+  -m  --mmproj  --device  -c  그리고 MTP 관련(--model-draft/--spec-type)
+
+환경변수
+  KV_TYPE=f16  PARALLEL=4  MTP=0  MAX_AUTO_CTX=32768  SKIP_CTX_PROBE=1
+  SERVER_START_TIMEOUT=600  PROBE_TIMEOUT=180
+
+예시
+  ./$SCRIPT_NAME                                딸깍 (대화형 + omakase)
+  ./$SCRIPT_NAME --reasoning off                omakase 에서 --reasoning 만 교체
+  ./$SCRIPT_NAME --no-ui-mcp-proxy              MCP 프록시만 끔
+  ./$SCRIPT_NAME -m models/a/b.gguf -c 8192 -y  비대화형 (스크립트·AI 자동화)
+  ./$SCRIPT_NAME --dry-run                      최종 명령줄만 확인
+  ./$SCRIPT_NAME --no-omakase -m ... -ngl 99    omakase 없이 전부 직접
+
+비대화형(-y 또는 TTY 없음)에서는 모델을 -m 으로 지정해야 합니다 (--list 로 확인).
+llama.cpp 플래그 전체 목록:  ./llama_server_<백엔드>/llama-server --help
+EOF
+}
+
+_a=("$@"); _i=0
+while [ $_i -lt ${#_a[@]} ]; do
+  _t="${_a[$_i]}"
+  case "$_t" in
+    --) _i=$(( _i + 1 ))
+        while [ $_i -lt ${#_a[@]} ]; do PASS_RAW+=("${_a[$_i]}"); _i=$(( _i + 1 )); done
+        break ;;
+    -h|--help)    print_help; exit 0 ;;
+    --list)       DO_LIST=1 ;;
+    --dry-run)    DRY_RUN=1 ;;
+    -y|--yes)     ASSUME_YES=1 ;;
+    --omakase)    OMAKASE=1 ;;
+    --no-omakase) OMAKASE=0 ;;
+    --backend|--model-dir)
+        if [ $(( _i + 1 )) -ge ${#_a[@]} ]; then
+          echo "Error: $_t 에는 값이 필요합니다." >&2; exit 2
+        fi
+        _i=$(( _i + 1 ))
+        case "$_t" in --backend) WANT_BACKEND="${_a[$_i]}" ;; *) MODEL_DIR="${_a[$_i]}" ;; esac ;;
+    --backend=*)   WANT_BACKEND="${_t#*=}" ;;
+    --model-dir=*) MODEL_DIR="${_t#*=}" ;;
+    *) PASS_RAW+=("$_t") ;;
   esac
   _i=$(( _i + 1 ))
 done
-echo "llama-server 포트: ${SERVER_PORT}  (변경: ./run_llama_server.sh --port 1234)"
+
+# 대화형 여부. -y 로 끄거나, 파이프/cron 처럼 TTY 가 없으면 자동으로 꺼진다.
+# 이 값이 0 이면 어떤 질문도 하지 않고 기본값으로 진행한다(자동화 경로).
+INTERACTIVE=1
+[ "$ASSUME_YES" -eq 1 ] && INTERACTIVE=0
+[ -t 0 ] || INTERACTIVE=0
 
 # ─── 설치된 백엔드 탐지 및 선택 ───────────────────────────────────────────────
 # build_llama_server.sh 가 백엔드별로 llama_server_rocm / llama_server_vulkan /
@@ -88,7 +162,11 @@ else
   # 굳이 [ -t 0 ] 로 막으면 파이프로 넘긴 선택값까지 무시되어 이 스크립트의
   # 다른 프롬프트(모델 선택 등)와 동작이 어긋난다.
   _sel=""
-  read -r -p "사용할 백엔드 번호 [기본값 0: ${BACKEND_NAMES[0]}]: " _sel || true
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    read -r -p "사용할 백엔드 번호 [기본값 0: ${BACKEND_NAMES[0]}]: " _sel || true
+  else
+    echo "  → 비대화형이라 [0] 을 씁니다 (--backend 로 지정 가능)"
+  fi
   if [[ "$_sel" =~ ^[0-9]+$ ]] && [ "$_sel" -lt "${#BACKEND_DIRS[@]}" ]; then
     SELECTED_DIR="${BACKEND_DIRS[$_sel]}"
   else
@@ -109,9 +187,11 @@ fi
 # 한정해서 적용한다(아래 --list-devices 조회, 서버 기동 시 각각 LD_LIBRARY_PATH=... 접두 참고).
 LLAMA_LD_LIBRARY_PATH="$SELECTED_DIR"
 
-# 기존 프로세스 종료
-pkill -9 -f llama-server || true
-sleep 1
+# 기존 프로세스 종료. --dry-run 은 아무것도 건드리지 않는다(명령줄만 뽑는 용도).
+if [ "$DRY_RUN" -eq 0 ]; then
+  pkill -9 -f llama-server || true
+  sleep 1
+fi
 
 SERVER_BIN="$SELECTED_DIR/llama-server"
 
@@ -177,6 +257,108 @@ if ! _check_llama_server_ok; then
   fi
 fi
 
+# ─── 인자 파싱 2단계: llama-server --help 를 표로 읽어 검증한다 ──────────────
+# 손으로 관리하는 플래그 화이트리스트는 두지 않는다. 방금 고른 바이너리 자신에게
+# 물어보므로 llama.cpp 버전이 올라가 플래그가 늘거나 이름이 바뀌어도 따라간다.
+#
+# --help 출력은 "스펙(1~40칸) + 설명(41칸~)" 의 고정 컬럼이다. 스펙이 40칸을
+# 넘치면 설명이 다음 줄로 밀리므로, 40번째 칸이 공백인지로 두 경우를 가른다.
+# (실측: 이 빌드의 --help 는 420줄 중 49줄이 스펙 오버플로였다.)
+#
+# 핵심: llama.cpp 는 부울 플래그를 한 줄에 쌍으로 선언한다.
+#     --ui-mcp-proxy, --webui-mcp-proxy, --no-ui-mcp-proxy, --no-webui-mcp-proxy
+#     --jinja, --no-jinja      --warmup, --no-warmup      --mmap, --no-mmap
+# 그래서 같은 줄의 이름들을 한 그룹(canon)으로 묶어두면, 사용자가
+# --no-ui-mcp-proxy 를 줬을 때 omakase 의 --ui-mcp-proxy 가 저절로 빠진다.
+# 값 없는 omakase 항목을 개별로 빼는 문법을 스크립트가 새로 만들 필요가 없다.
+_FLAG_AWK='
+/^-/{
+  line=$0; sub(/[ \t]+$/,"",line)
+  if (substr(line,40,1)==" ") spec=substr(line,1,40); else spec=line
+  gsub(/^[ \t]+|[ \t]+$/,"",spec)
+  n=split(spec,t," "); cnt=0; arity=0; delete nm
+  for(i=1;i<=n;i++){ tok=t[i]; sub(/,$/,"",tok)
+    if (tok ~ /^-/) nm[++cnt]=tok; else { arity=1; break } }
+  if (cnt==0) next
+  if (nm[1] ~ /^-+$/) next
+  canon=""
+  for(i=1;i<=cnt && canon=="";i++) if (nm[i] ~ /^--/ && nm[i] !~ /^--no-/) canon=nm[i]
+  for(i=1;i<=cnt && canon=="";i++) if (nm[i] ~ /^--/) canon=nm[i]
+  if (canon=="") canon=nm[1]
+  for(i=1;i<=cnt;i++) printf "%s\t%d\t%s\n", nm[i], arity, canon
+}'
+
+declare -A FLAG_ARITY FLAG_CANON USER_FLAG USER_VAL
+while IFS=$'\t' read -r _n _ar _cn; do
+  [ -n "$_n" ] || continue
+  FLAG_ARITY["$_n"]="$_ar"; FLAG_CANON["$_n"]="$_cn"
+done < <(LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
+           "$SERVER_BIN" --help 2>/dev/null | awk "$_FLAG_AWK")
+
+if [ "${#FLAG_ARITY[@]}" -lt 50 ]; then
+  echo "Error: $SERVER_BIN --help 을 읽지 못했습니다 (플래그 ${#FLAG_ARITY[@]}개 인식)." >&2
+  echo "  바이너리가 손상되었을 수 있습니다. bash build_llama_server.sh 로 재설치하세요." >&2
+  exit 1
+fi
+
+# LLAMA_ARGS : 사용자가 직접 준 llama.cpp 플래그 (원문 그대로, 순서 보존)
+# PROBE_EXTRA: 컨텍스트 -fit 프로브에도 반영할 것들 (포트/컨텍스트/호스트는 제외)
+LLAMA_ARGS=(); PROBE_EXTRA=()
+_j=0
+while [ $_j -lt ${#PASS_RAW[@]} ]; do
+  _t="${PASS_RAW[$_j]}"
+  _name="$_t"; _inline=0
+  if [ -z "${FLAG_ARITY[$_t]:-}" ]; then
+    case "$_t" in *=*) _name="${_t%%=*}"; _inline=1 ;; esac
+  fi
+  if [ -z "${FLAG_ARITY[$_name]:-}" ]; then
+    echo "" >&2
+    case "$_t" in
+      -*) echo "Error: 알 수 없는 플래그: $_t" >&2 ;;
+      *)  echo "Error: 위치 인자는 받지 않습니다: $_t" >&2 ;;
+    esac
+    _k="${_name##*-}"
+    if [ "${#_k}" -ge 3 ]; then
+      _sug=$(printf '%s\n' "${!FLAG_ARITY[@]}" | grep -iF -- "$_k" | sort | head -6 | tr '\n' ' ')
+      [ -n "$_sug" ] && echo "  혹시 이건가요: $_sug" >&2
+    fi
+    echo "  스크립트 플래그  : ./$SCRIPT_NAME --help" >&2
+    echo "  llama.cpp 플래그 : $SERVER_BIN --help" >&2
+    exit 2
+  fi
+  _canon="${FLAG_CANON[$_name]}"
+  USER_FLAG["$_canon"]=1
+  _chunk=()
+  if [ "$_inline" -eq 1 ]; then
+    _chunk=("$_t"); USER_VAL["$_canon"]="${_t#*=}"
+  elif [ "${FLAG_ARITY[$_name]}" -eq 1 ]; then
+    _j=$(( _j + 1 ))
+    if [ $_j -ge ${#PASS_RAW[@]} ]; then
+      echo "Error: $_t 에는 값이 필요합니다." >&2; exit 2
+    fi
+    _chunk=("$_t" "${PASS_RAW[$_j]}"); USER_VAL["$_canon"]="${PASS_RAW[$_j]}"
+  else
+    _chunk=("$_t"); USER_VAL["$_canon"]=""
+  fi
+  LLAMA_ARGS+=("${_chunk[@]}")
+  case "$_canon" in
+    --port|--host|--ctx-size) : ;;   # 프로브는 자체 포트/컨텍스트로 돈다
+    *) PROBE_EXTRA+=("${_chunk[@]}") ;;
+  esac
+  _j=$(( _j + 1 ))
+done
+
+# 사용자가 직접 준 값은 스크립트의 계산에도 반영해야 한다. 특히 -ctk/--parallel 은
+# 컨텍스트 추정에 그대로 들어가므로 여기서 안 받으면 추정이 어긋난다.
+[ -n "${USER_VAL[--port]:-}" ] && SERVER_PORT="${USER_VAL[--port]}"
+
+# 사용자가 지정한 omakase 항목이 있으면 그 항목만 빠진다는 것을 미리 알려준다.
+if [ "$OMAKASE" -eq 0 ]; then
+  echo "omakase: 꺼짐 (--no-omakase) — 필요한 플래그를 직접 다 지정해야 합니다"
+elif [ "${#USER_FLAG[@]}" -gt 0 ]; then
+  echo "omakase: 켜짐 · 직접 지정한 ${#USER_FLAG[@]}개는 그대로 존중합니다 (${!USER_FLAG[*]})"
+fi
+
 # ─── GPU 백엔드/디바이스 자동 감지 ────────────────────────────────────────────
 # nvidia-smi/rocm-smi 같은 벤더 전용 도구 대신, 방금 빌드된 llama-server 바이너리
 # 자신에게 "어떤 디바이스가 보이는지" 물어본다(--list-devices). CUDA/ROCm/Vulkan/Metal
@@ -228,7 +410,17 @@ done
 CHOSEN_DEVICE=""
 chosen_free_mb=0
 
-if [ ${#DEVICE_IDS[@]} -eq 0 ]; then
+if [ -n "${USER_VAL[--device]:-}" ]; then
+  # 직접 지정했으면 선택 화면을 띄우지 않는다. 여유 VRAM 은 목록에서 찾아 쓰되,
+  # "CUDA0,CUDA1" 같은 복수 지정이면 못 찾을 수 있다(그 경우 -fit 프로브가 판단).
+  CHOSEN_DEVICE="${USER_VAL[--device]}"
+  for i in "${!DEVICE_IDS[@]}"; do
+    if [ "${DEVICE_IDS[$i]}" = "$CHOSEN_DEVICE" ]; then
+      chosen_free_mb="${DEVICE_FREE_MB[$i]}"; break
+    fi
+  done
+  echo "디바이스(직접 지정): $CHOSEN_DEVICE  (여유 ${chosen_free_mb} MiB)"
+elif [ ${#DEVICE_IDS[@]} -eq 0 ]; then
   echo "GPU 디바이스가 감지되지 않았습니다 (CPU-only 빌드이거나 드라이버 미인식). CPU로 진행합니다."
 elif [ ${#DEVICE_IDS[@]} -eq 1 ]; then
   CHOSEN_DEVICE="${DEVICE_IDS[0]}"
@@ -247,7 +439,12 @@ else
       default_idx=$i
     fi
   done
-  read -p "사용할 디바이스 번호 선택 [기본값 $default_idx: ${DEVICE_IDS[$default_idx]}]: " dev_choice
+  dev_choice=""
+  if [ "$INTERACTIVE" -eq 1 ]; then
+    read -p "사용할 디바이스 번호 선택 [기본값 $default_idx: ${DEVICE_IDS[$default_idx]}]: " dev_choice
+  else
+    echo "  → 비대화형이라 [$default_idx] 을 씁니다 (--device 로 지정 가능)"
+  fi
   if [[ "$dev_choice" =~ ^[0-9]+$ ]] && [ "$dev_choice" -ge 0 ] && [ "$dev_choice" -lt "${#DEVICE_IDS[@]}" ]; then
     default_idx="$dev_choice"
   fi
@@ -256,7 +453,115 @@ else
   echo "선택됨: ${DEVICE_LABELS[$default_idx]}"
 fi
 
-MODEL_DIR="models"
+# ─── GGUF 샤드 처리 ──────────────────────────────────────────────────────────
+# 대형 모델은 '<이름>-00001-of-00028.gguf' 처럼 쪼개져 배포된다. llama.cpp 는
+# 첫 조각만 -m 으로 받으면 llama_split_prefix 로 나머지를 알아서 연다. 그래서
+#   · 후보 목록에는 첫 조각만 보여야 한다 (28개를 늘어놓으면 고를 수가 없다)
+#   · 첫 조각이 아닌 걸 고르면 로딩이 실패하므로 미리 막아야 한다
+#   · 모델 크기는 조각 하나가 아니라 묶음 전체를 합해야 한다
+#     (안 그러면 88GB 모델을 1.7GB 로 보고 컨텍스트를 터무니없이 크게 잡는다)
+_fold_shards() {   # stdin: 정렬된 gguf 경로들 → stdout: 묶음당 첫 조각만
+  awk '{
+    if (match($0, /-[0-9][0-9][0-9][0-9][0-9]-of-[0-9][0-9][0-9][0-9][0-9]\.gguf$/)) {
+      base = substr($0, 1, RSTART-1)
+      if (base in seen) next
+      seen[base] = 1
+    }
+    print
+  }'
+}
+
+_shard_files() {   # $1: 첫 조각 → 같은 묶음의 모든 파일 (샤드가 아니면 자기 자신)
+  if [[ "$1" =~ ^(.+)-[0-9]{5}-of-([0-9]{5})\.gguf$ ]]; then
+    ls -1 "${BASH_REMATCH[1]}"-[0-9][0-9][0-9][0-9][0-9]-of-"${BASH_REMATCH[2]}".gguf 2>/dev/null
+  else
+    printf '%s\n' "$1"
+  fi
+}
+
+_total_bytes() {   # 묶음 전체 바이트. stat -L 로 심볼릭 링크도 실제 크기를 본다.
+  local t=0 b sz
+  while read -r b; do
+    [ -e "$b" ] || continue
+    sz=$(stat -Lc%s "$b" 2>/dev/null || stat -Lf%z "$b" 2>/dev/null || echo 0)
+    t=$(( t + sz ))
+  done < <(_shard_files "$1")
+  echo "$t"
+}
+
+_check_shards() {  # 첫 조각인지 + 묶음이 다 있는지. 아니면 이유를 말하고 1을 낸다.
+  [[ "$1" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]] || return 0
+  local base="${BASH_REMATCH[1]}" idx="${BASH_REMATCH[2]}" tot="${BASH_REMATCH[3]}" have
+  if [ "$idx" != "00001" ]; then
+    echo "Error: 샤드 묶음은 첫 조각을 지정해야 합니다." >&2
+    echo "  준 것: $1" >&2
+    echo "  이것: ${base}-00001-of-${tot}.gguf" >&2
+    return 1
+  fi
+  have=$(ls -1 "${base}"-[0-9][0-9][0-9][0-9][0-9]-of-"${tot}".gguf 2>/dev/null | wc -l)
+  if [ "$have" -ne "$((10#$tot))" ]; then
+    echo "Error: 샤드가 모자랍니다 — $((10#$tot)) 개 중 ${have} 개만 있습니다." >&2
+    echo "  다운로드를 마저 받으세요: python3 download_model.py" >&2
+    return 1
+  fi
+  return 0
+}
+
+# ─── --list: 고를 수 있는 것들을 보여주고 끝낸다 (자동화 전 정찰용) ─────────
+if [ "$DO_LIST" -eq 1 ]; then
+  echo ""
+  echo "백엔드 (--backend NAME)"
+  for i in "${!BACKEND_NAMES[@]}"; do printf "  %s\n" "${BACKEND_NAMES[$i]}"; done
+  echo ""
+  echo "디바이스 (--device ID)"
+  if [ ${#DEVICE_IDS[@]} -eq 0 ]; then echo "  (감지된 GPU 없음)"
+  else for i in "${!DEVICE_IDS[@]}"; do printf "  %s\n" "${DEVICE_LABELS[$i]}"; done; fi
+  echo ""
+  echo "모델 (-m PATH)   — $MODEL_DIR 아래"
+  if [ -d "$MODEL_DIR" ]; then
+    find "$MODEL_DIR" -maxdepth 2 \( -type f -o -type l \) -iname "*.gguf" 2>/dev/null \
+      | grep -viE 'mmproj' | sort | _fold_shards \
+      | while read -r _f; do
+          _n=$(_shard_files "$_f" | wc -l)
+          _b=$(_total_bytes "$_f")
+          printf "  %8s  %s%s\n" \
+            "$(awk -v b="$_b" 'BEGIN{printf "%.1fG", b/1073741824}')" "$_f" \
+            "$([ "$_n" -gt 1 ] && echo "   (샤드 ${_n}개 묶음)")"
+        done
+  else
+    echo "  (디렉터리 없음: $MODEL_DIR)"
+  fi
+  echo ""
+  exit 0
+fi
+
+if [ -n "${USER_VAL[--model]:-}" ]; then
+  # -m 을 직접 줬으면 탐색·선택을 전부 건너뛴다. 자동화(-y, 비대화형)의 정규 경로.
+  MODEL_PATH="${USER_VAL[--model]}"
+  if [ ! -f "$MODEL_PATH" ]; then
+    echo "Error: -m 으로 준 파일이 없습니다: $MODEL_PATH" >&2; exit 1
+  fi
+  TARGET_DIR="$(dirname "$MODEL_PATH")"
+  PROJ_PATH="${USER_VAL[--mmproj]:-}"
+  echo "모델(직접 지정): $MODEL_PATH"
+  if [ -n "$PROJ_PATH" ]; then
+    [ -f "$PROJ_PATH" ] || { echo "Error: --mmproj 파일이 없습니다: $PROJ_PATH" >&2; exit 1; }
+    echo "프로젝션(직접 지정): $PROJ_PATH"
+  fi
+  # MTP 사이드카는 같은 디렉터리에서만 조용히 찾아본다(대화형 경로와 같은 패턴).
+  mapfile -t MTP_CANDS < <(find "$TARGET_DIR" -maxdepth 1 \( -type f -o -type l \) -iname "*.gguf" 2>/dev/null \
+    | grep -Ei '(_mtp\.gguf|[-_.]fastmtp([-_.][^/]*)?\.gguf|/mtp[-_.][^/]*\.gguf)$' | sort || true)
+  if [ ${#MTP_CANDS[@]} -gt 0 ]; then
+    MTP_PATH="${MTP_CANDS[0]}"; echo "Auto-detected MTP draft model: $MTP_PATH"
+  else
+    MTP_PATH=""
+  fi
+else
+if [ "$INTERACTIVE" -eq 0 ]; then
+  echo "Error: 비대화형(-y 또는 TTY 없음)에서는 모델을 -m 으로 지정해야 합니다." >&2
+  echo "  후보 보기: ./$SCRIPT_NAME --list" >&2
+  exit 2
+fi
 
 echo "Available model directories under '$MODEL_DIR':"
 mapfile -t DIRS < <(find "$MODEL_DIR" -maxdepth 1 -mindepth 1 -type d | sort)
@@ -280,18 +585,13 @@ select CHOSEN_DIR in "${options[@]}"; do
   fi
 done
 
-# ── 디스크 페이징 모드 검증 (LAZY_MODE=auto|on|off) ─────────────────────────
-# 값 검사는 여기서 한다 — 2분짜리 로딩을 태운 뒤에 "잘못된 값" 을 보면 안 된다.
-LAZY_MODE="${LAZY_MODE:-auto}"
-case "$LAZY_MODE" in
-  auto|on|off) : ;;
-  *) echo "⛔ LAZY_MODE 는 auto|on|off 중 하나여야 합니다 (받은 값: $LAZY_MODE)"; exit 1 ;;
-esac
-if [ "$LAZY_MODE" = "off" ]; then
-  echo "⚠ LAZY_MODE=off — 페이징 대상 텐서를 통째로 메모리에 올립니다."
+# ── -lzm off 조기 경고 ──────────────────────────────────────────────────────
+# 페이징을 끄는 건 정당한 선택일 수 있지만(VRAM 에 다 들어가는 모델), 큰 색인
+# 텐서가 있는 모델에서는 즉사한다. 2분짜리 로딩을 태우기 전에 알린다.
+if [ "${USER_VAL[--lazy-mode]:-auto}" = "off" ]; then
+  echo "⚠ -lzm off — 페이징 대상 텐서를 통째로 메모리에 올립니다."
   echo "  큰 색인 텐서가 있는 모델(예: Qwen3.8-Flash-Next 의 36 GiB n-gram 테이블)에서는"
   echo "  RAM 이 부족해 죽습니다. 이 박스(RAM 30 GiB)에서는 실측으로 죽었습니다."
-  read -p "  그래도 진행할까요? (y/N): " _lz; [[ "${_lz:-N}" =~ ^[Yy]$ ]] || exit 1
 fi
 
 # Auto-detect mmproj and model inside the chosen directory
@@ -331,45 +631,22 @@ else
       model_tmp+=("$f")
     fi
   done
-  mapfile -t MODEL_CANDS < <(printf '%s\n' "${model_tmp[@]}" | grep -v '^$' || true)
+  mapfile -t MODEL_CANDS < <(printf '%s\n' "${model_tmp[@]}" | grep -v '^$' | _fold_shards)
 
-  # ── 샤드 분할 GGUF 접기 ────────────────────────────────────────────────────
-  # 큰 모델은 '…-00001-of-00033.gguf' 로 쪼개져 있다. 접지 않으면 select 메뉴에
-  # 33줄이 뜨고, 무엇을 고르든 조각 하나가 -m 으로 넘어가 llama.cpp 가
-  # 'invalid split file name' 으로 죽는다. llama.cpp 에는 **첫 샤드만** 주면
-  # 나머지는 이름에서 계산해 찾는다(llama_split_prefix).
-  # 접두사(-NNNNN-of-NNNNN 를 뗀 것)로 묶고, 묶음당 첫 샤드 하나만 남긴다.
-  declare -A _shard_first _shard_n _shard_want _shard_bytes
-  folded=()
-  for f in "${MODEL_CANDS[@]}"; do
-    b="$(basename "$f")"
-    if [[ "$b" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]]; then
-      key="$(dirname "$f")/${BASH_REMATCH[1]}"
-      idx=$((10#${BASH_REMATCH[2]})); want=$((10#${BASH_REMATCH[3]}))
-      _shard_n["$key"]=$(( ${_shard_n["$key"]:-0} + 1 ))
-      _shard_want["$key"]=$want
-      _shard_bytes["$key"]=$(( ${_shard_bytes["$key"]:-0} + $(stat -Lc%s "$f" 2>/dev/null || echo 0) ))
-      if [ "$idx" -eq 1 ]; then _shard_first["$key"]="$f"; folded+=("$f"); fi
+  # 샤드 묶음 요약. 조각이 모자라거나 첫 조각이 없으면 목록 단계에서 알린다 —
+  # 띄운 뒤 'invalid split count' 로 죽는 것보다 고르기 전에 보이는 편이 낫다.
+  for _f in "${MODEL_CANDS[@]}"; do
+    _have=$(_shard_files "$_f" | wc -l)
+    [ "$_have" -gt 1 ] || continue
+    [[ "$(basename "$_f")" =~ -([0-9]{5})-of-([0-9]{5})\.gguf$ ]] || continue
+    _idx=$((10#${BASH_REMATCH[1]})); _want=$((10#${BASH_REMATCH[2]}))
+    _gb=$(awk -v b="$(_total_bytes "$_f")" 'BEGIN{printf "%.1f", b/1073741824}')
+    if [ "$_idx" -ne 1 ]; then
+      echo "⚠ 샤드 묶음: $(basename "$_f") — 첫 조각(-00001-of-*)이 없습니다. 이 묶음은 띄울 수 없습니다."
+    elif [ "$_have" -eq "$_want" ]; then
+      echo "샤드 묶음: $(basename "$_f") — ${_have}/${_want}개 · ${_gb} GiB"
     else
-      folded+=("$f")
-    fi
-  done
-  # 첫 샤드가 없는 묶음(00001 누락)은 위 루프에서 후보가 안 잡히므로 여기서 알린다
-  for key in "${!_shard_n[@]}"; do
-    if [ -z "${_shard_first[$key]:-}" ]; then
-      echo "⚠ $(basename "$key"): 첫 샤드(-00001-of-*)가 없습니다. 이 묶음은 띄울 수 없습니다."
-    fi
-  done
-  mapfile -t MODEL_CANDS < <(printf '%s\n' "${folded[@]}" | grep -v '^$' || true)
-
-  # 묶음 요약을 한 줄씩 보여 준다 (메뉴에서 무엇을 고르는지 알 수 있게)
-  for key in "${!_shard_n[@]}"; do
-    have=${_shard_n[$key]}; want=${_shard_want[$key]}
-    gb=$(awk -v b="${_shard_bytes[$key]:-0}" 'BEGIN{printf "%.1f", b/1073741824}')
-    if [ "$have" -eq "$want" ]; then
-      echo "샤드 묶음: $(basename "$key") — ${have}/${want}개 · ${gb} GiB"
-    else
-      echo "⚠ 샤드 묶음: $(basename "$key") — ${have}/${want}개 · ${gb} GiB  ($((want-have))개 없음 — 띄우면 'invalid split count' 로 죽습니다)"
+      echo "⚠ 샤드 묶음: $(basename "$_f") — ${_have}/${_want}개 · ${_gb} GiB  ($((_want-_have))개 없음 — 띄우면 'invalid split count' 로 죽습니다)"
     fi
   done
 
@@ -414,30 +691,6 @@ fi
 
 # ── 샤드 완결성 검사 ──────────────────────────────────────────────────────────
 # 여기서 막지 않으면 100초짜리 로딩을 태운 뒤에야 'invalid split count' 를 본다.
-# llama.cpp 는 첫 샤드 이름에서 나머지 경로를 계산하므로, 이름이 하나라도
-# 어긋나거나 빠지면 못 찾는다.
-check_shards() {
-  local first="$1" base dir stem want i path missing=0
-  base="$(basename "$first")"
-  [[ "$base" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]] || return 0   # 단일 파일
-  dir="$(dirname "$first")"; stem="${BASH_REMATCH[1]}"; want=$((10#${BASH_REMATCH[3]}))
-  if [ "$((10#${BASH_REMATCH[2]}))" -ne 1 ]; then
-    echo "⛔ 샤드 모델은 **첫 샤드**를 지정해야 합니다: ${stem}-00001-of-$(printf '%05d' "$want").gguf"
-    return 1
-  fi
-  for ((i=1;i<=want;i++)); do
-    path="$dir/${stem}-$(printf '%05d' "$i")-of-$(printf '%05d' "$want").gguf"
-    [ -f "$path" ] || { echo "   없음: $(basename "$path")"; missing=$((missing+1)); }
-    [ "$missing" -ge 5 ] && { echo "   … (이하 생략)"; break; }
-  done
-  if [ "$missing" -gt 0 ]; then
-    echo "⛔ 샤드가 빠졌습니다. 다 받고 다시 실행하세요 (download_model.sh 가 이어받습니다)."
-    return 1
-  fi
-  echo "샤드 ${want}개 모두 확인 — llama.cpp 에는 첫 샤드만 넘깁니다."
-  return 0
-}
-check_shards "$MODEL_PATH" || exit 1
 
 # Confirm auto-detected paths with user
 echo "Detected paths: model=$MODEL_PATH proj=${PROJ_PATH:-<none>}"
@@ -488,6 +741,7 @@ if [[ "$IS_VISION" =~ ^[Yy]$ ]] && [ -z "${PROJ_PATH:-}" ]; then
     done
   fi
 fi
+fi   # ← -m 직접 지정 / 대화형 탐색 분기 끝
 
 # ─────────────────────────────────────────────────────────────────────────────
 # MTP(다중 토큰 예측) 설정
@@ -527,7 +781,10 @@ _llama_has_d2t_support() {
 
 MTP_ARGS=()
 MTP_EMBEDDED=0
-if [ "${MTP:-1}" = "0" ]; then
+if [ -n "${USER_FLAG[--spec-type]:-}" ] || [ -n "${USER_FLAG[--spec-draft-model]:-}" ]; then
+  echo "MTP: 드래프트 플래그를 직접 지정하셨으므로 스크립트는 관여하지 않습니다"
+  MTP_PATH=""
+elif [ "${MTP:-1}" = "0" ]; then
   echo "MTP: 환경변수 MTP=0 → 비활성화"
   MTP_PATH=""
 else
@@ -560,6 +817,31 @@ else
   fi
 fi
 
+_check_shards "$MODEL_PATH" || exit 1
+
+# ─── 디스크 페이징(lazy read) 안전장치 ───────────────────────────────────────
+# llama.cpp 는 세 조건이 **모두** 맞을 때만 텐서를 파일에 남긴다:
+#   ① 아키텍처가 그 텐서에 TENSOR_READ_LAZY 를 달았다 (qwen4exp 의 n-gram 테이블,
+#      gemma3n/gemma4 의 per-layer 임베딩 등. 전부 GET_ROWS 색인 텐서다)
+#   ② -lzm auto(기본) 면 그 텐서가 4 GiB 를 넘는다 (-lzm on 이면 크기 무시)
+#   ③ mmap 을 쓸 수 있다
+# 화이트리스트 방식이라 일반 dense 모델에서는 아무 일도 일어나지 않는다.
+# llama.cpp 의 -lzm(--lazy-mode) 은 기본값 auto 다: 4 GiB 를 넘는 lazy 표시 텐서를
+# mmap 으로 두고 실제로 참조되는 행만 페이지 단위로 읽는다. 덕분에 VRAM 보다 훨씬
+# 큰 모델이 뜬다(이 저장소의 Flash-Next 는 51.2B PLE 테이블이 디스크에 남는다).
+#
+# 그런데 아래 세 플래그는 그 전제를 부순다. --no-mmap 은 mmap 자체를 없애고,
+# --mlock 은 전부 물리 메모리에 못 박고, --load-mode 는 적재 방식을 직접 정한다.
+# VRAM 에 다 들어가는 모델이면 셋 다 정당한 선택이므로 막지는 않고, "안 들어가는데
+# 줬을 때"만 경고한다. 페이징을 일부러 끄고 싶으면 -lzm off 를 쓰면 된다.
+for _f in --mmap --mlock --load-mode; do
+  if [ -n "${USER_FLAG[$_f]:-}" ]; then
+    echo "⚠️  $_f 계열 플래그는 디스크 페이징(lazy read)을 무력화합니다."
+    echo "    모델이 VRAM 보다 크면 로딩이 실패하거나 스왑으로 떨어집니다."
+    break
+  fi
+done
+
 LOG_FILE="logs/llama_server.log"
 
 mkdir -p "$(dirname "$LOG_FILE")"
@@ -568,21 +850,12 @@ mkdir -p "$(dirname "$LOG_FILE")"
 model_bytes=0
 proj_bytes=0
 if [ -f "$MODEL_PATH" ]; then
-  # 샤드 분할이면 **묶음 전체**를 더한다. 첫 샤드만 재면 88 GB 모델이 662 MB 로 찍히고,
-  # 그 값으로 컨텍스트를 추정하는 2·3순위 경로가 VRAM 을 크게 과대평가한다.
-  _mb="$(basename "$MODEL_PATH")"
-  if [[ "$_mb" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]]; then
-    model_bytes=0
-    for _sh in "$(dirname "$MODEL_PATH")/${BASH_REMATCH[1]}"-[0-9][0-9][0-9][0-9][0-9]-of-*.gguf; do
-      [ -e "$_sh" ] || continue
-      model_bytes=$(( model_bytes + $(stat -Lc%s "$_sh" 2>/dev/null || echo 0) ))
-    done
-  else
-    model_bytes=$(stat -Lc%s "$MODEL_PATH" 2>/dev/null || stat -f%z "$MODEL_PATH" 2>/dev/null || echo 0)
-  fi
+  # 샤드 분할이면 **묶음 전체**를 더한다. 첫 조각만 재면 88 GB 모델이 662 MB 로 찍히고,
+  # 그 값으로 컨텍스트를 추정하는 2·3순위 경로가 여유 VRAM 을 크게 과대평가한다.
+  model_bytes=$(_total_bytes "$MODEL_PATH")
 fi
 if [ -n "$PROJ_PATH" ] && [ -f "$PROJ_PATH" ]; then
-  proj_bytes=$(stat -Lc%s "$PROJ_PATH" 2>/dev/null || stat -f%z "$PROJ_PATH" 2>/dev/null || echo 0)
+  proj_bytes=$(stat -Lc%s "$PROJ_PATH" 2>/dev/null || stat -Lf%z "$PROJ_PATH" 2>/dev/null || echo 0)
 fi
 
 # MTP 사이드카도 VRAM 을 먹는다(903MB 짜리도 있다). 1순위 -fit 경로는 드래프트를
@@ -590,7 +863,7 @@ fi
 # 계산하므로 여기서 같이 빼 주지 않으면 그만큼 컨텍스트를 과대평가한다.
 mtp_bytes=0
 if [ -n "${MTP_PATH:-}" ] && [ -f "$MTP_PATH" ]; then
-  mtp_bytes=$(stat -c%s "$MTP_PATH" 2>/dev/null || stat -f%z "$MTP_PATH" 2>/dev/null || echo 0)
+  mtp_bytes=$(_total_bytes "$MTP_PATH")
 fi
 
 model_mb=$(( (model_bytes + 1024*1024 - 1) / (1024*1024) ))
@@ -644,8 +917,15 @@ fi
 #     (원소당 2.0B → 1.0625B, 실측한 토큰당 KV 도 정확히 이 비율로 줄어든다)
 #   - q4_0 대비 양자화 손실이 작다
 # 다른 값이 필요하면 KV_TYPE 환경변수로 바꾼다 (예: KV_TYPE=f16 ./run_llama_server.sh).
-KV_TYPE=${KV_TYPE:-q8_0}
-echo "KV 캐시 타입: ${KV_TYPE}  (백엔드=${CHOSEN_DEVICE:-CPU}, KV_TYPE 환경변수로 변경 가능)"
+# -ctk 를 직접 줬으면 그 값이 컨텍스트 추정에도 그대로 들어가야 한다.
+# 여기서 안 받으면 추정은 q8_0 기준인데 실제는 f16 이 되어 VRAM 이 두 배로 튄다.
+if [ -n "${USER_VAL[--cache-type-k]:-}" ]; then
+  KV_TYPE="${USER_VAL[--cache-type-k]}"
+  echo "KV 캐시 타입: ${KV_TYPE}  (-ctk 로 직접 지정)"
+else
+  KV_TYPE=${KV_TYPE:-q8_0}
+  echo "KV 캐시 타입: ${KV_TYPE}  (백엔드=${CHOSEN_DEVICE:-CPU}, KV_TYPE 환경변수 또는 -ctk 로 변경)"
+fi
 
 # [FIX] 슬롯 개수(--parallel)를 명시한다. 지정하지 않으면 llama-server 기본값이 4 인데,
 # Vulkan 백엔드에서는 이것만으로 토큰 생성이 무너진다.
@@ -661,8 +941,13 @@ echo "KV 캐시 타입: ${KV_TYPE}  (백엔드=${CHOSEN_DEVICE:-CPU}, KV_TYPE �
 #
 # 슬롯을 여러 개 두면 동시 요청 처리량이 늘지만, 개인용 서버는 보통 한 번에 한 요청만
 # 처리하므로 1 이 지연시간 면에서 유리하다. 동시 사용자가 여럿이면 PARALLEL 로 올린다.
-N_PARALLEL=${PARALLEL:-1}
-echo "슬롯 수(--parallel): ${N_PARALLEL}  (동시 요청을 여럿 받으려면 PARALLEL=4 등으로 지정)"
+if [ -n "${USER_VAL[--parallel]:-}" ]; then
+  N_PARALLEL="${USER_VAL[--parallel]}"
+  echo "슬롯 수(--parallel): ${N_PARALLEL}  (직접 지정)"
+else
+  N_PARALLEL=${PARALLEL:-1}
+  echo "슬롯 수(--parallel): ${N_PARALLEL}  (동시 요청을 여럿 받으려면 PARALLEL=4 또는 --parallel 4)"
+fi
 if [[ "${CHOSEN_DEVICE}" == Vulkan* ]] && [ "$N_PARALLEL" -gt 1 ]; then
   echo "⚠️  Vulkan 백엔드에서 --parallel > 1 은 생성 속도를 10배 가까이 떨어뜨립니다"
   echo "    (실측: parallel=1 에서 55 t/s → parallel=4 에서 5.5 t/s)."
@@ -740,8 +1025,11 @@ probe_fit() {
   [ -n "${PROJ_PATH:-}" ] && args+=( --mmproj "$PROJ_PATH" )
   args+=( "${MTP_ARGS[@]}" )
   [ -n "${CHOSEN_DEVICE:-}" ] && args+=( --device "$CHOSEN_DEVICE" )
-  args+=( -ngl 99 -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --parallel "$N_PARALLEL"
-          --no-warmup -v --port "$probe_port" --host 127.0.0.1 )
+  args+=( -ngl 99 -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --parallel "$N_PARALLEL" )
+  # 사용자가 직접 준 플래그를 뒤에 붙인다(뒤가 이긴다). -ngl 40 처럼 VRAM 사용량을
+  # 바꾸는 지정이 프로브에 반영되지 않으면 컨텍스트 추정이 그만큼 어긋난다.
+  args+=( "${PROBE_EXTRA[@]}" )
+  args+=( --no-warmup -v --port "$probe_port" --host 127.0.0.1 )
   LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
     "$SERVER_BIN" "${args[@]}" > "$log" 2>&1 &
   pid=$!
@@ -799,7 +1087,10 @@ fit_ok=0
 kv_probe_ok=0
 n_ctx_train=0
 
-if [ "${SKIP_CTX_PROBE:-0}" != "1" ] && [ -x "$SERVER_BIN" ] && [ -f "$MODEL_PATH" ]; then
+# -c 를 직접 줬으면 프로브를 돌릴 이유가 없다(값을 이미 알고 있다). 자동화 경로에서
+# 서버를 한 번 더 띄우는 비용을 없앤다.
+if [ "${SKIP_CTX_PROBE:-0}" != "1" ] && [ -z "${USER_VAL[--ctx-size]:-}" ] \
+   && [ -x "$SERVER_BIN" ] && [ -f "$MODEL_PATH" ]; then
   probe_tmp="$(mktemp -d 2>/dev/null || echo "/tmp/llama_ctx_probe.$$")"
   mkdir -p "$probe_tmp"
 
@@ -849,7 +1140,11 @@ if [ "${SKIP_CTX_PROBE:-0}" != "1" ] && [ -x "$SERVER_BIN" ] && [ -f "$MODEL_PAT
     echo "    측정 로그: $probe_tmp"
   fi
 else
-  echo "컨텍스트 계산을 건너뜁니다 (SKIP_CTX_PROBE=1 이거나 바이너리/모델 경로 없음)."
+  if [ -n "${USER_VAL[--ctx-size]:-}" ]; then
+    echo "컨텍스트를 직접 주셨으므로 -fit 프로브를 건너뜁니다."
+  else
+    echo "컨텍스트 계산을 건너뜁니다 (SKIP_CTX_PROBE=1 이거나 바이너리/모델 경로 없음)."
+  fi
   echo "옛 상수로 추정합니다."
 fi
 
@@ -945,10 +1240,19 @@ if [ "$fit_ok" -eq 1 ] && [ "${max_auto_ctx:-0}" -eq 0 ]; then
 else
   echo "Enter 를 누르면 -c ${largest_ctx} 로 띄웁니다."
 fi
-read -p "Enter desired context tokens (-c) [largest: ${largest_ctx}]: " user_c
-
+user_c=""
 C_ARGS=()
-if [[ "$user_c" =~ ^[0-9]+$ ]] && [ "$user_c" -gt 0 ]; then
+if [ -n "${USER_VAL[--ctx-size]:-}" ]; then
+  # 이미 LLAMA_ARGS 에 들어 있으므로 C_ARGS 는 비워둔다(중복 방지).
+  c_opt="${USER_VAL[--ctx-size]}"
+  echo "컨텍스트: -c $c_opt (직접 지정)"
+elif [ "$INTERACTIVE" -eq 1 ]; then
+  read -p "Enter desired context tokens (-c) [largest: ${largest_ctx}]: " user_c
+fi
+
+if [ -n "${USER_VAL[--ctx-size]:-}" ]; then
+  :
+elif [[ "$user_c" =~ ^[0-9]+$ ]] && [ "$user_c" -gt 0 ]; then
   c_opt="$user_c"
   C_ARGS=( -c "$c_opt" )
   echo "Using user-specified -c $c_opt"
@@ -961,51 +1265,73 @@ else
   echo "Empty or invalid input — falling back to -c $c_opt"
 fi
 
-# Start server
-echo "Starting llama-server with model: $MODEL_PATH"
-ARGS=( -m "$MODEL_PATH" )
-if [ -n "$PROJ_PATH" ]; then
+# ─── 최종 명령줄 조립 ────────────────────────────────────────────────────────
+# 우선순위(낮음 → 높음)
+#   1. omakase        : 스크립트의 취향/튜닝 기본값. 같은 손잡이를 직접 지정하면 빠진다
+#   2. 선택·계산 결과 : -m/--mmproj/--device/-c/MTP. 대화형 선택이나 -fit 계산의 산물
+#   3. 사용자 플래그  : 원문 그대로, 맨 뒤에 붙는다(llama.cpp 파서는 뒤가 이긴다)
+#
+# om() 은 "이 손잡이를 사용자가 건드렸는가"를 별칭 그룹(canon) 단위로 본다. 그래서
+# -ngl 대신 --n-gpu-layers 를 써도, --ui-mcp-proxy 대신 --no-ui-mcp-proxy 를 써도
+# 같은 그룹으로 인식되어 omakase 의 해당 항목이 정확히 하나 빠진다.
+ARGS=()
+om() {
+  local n="$1"; shift
+  [ "$OMAKASE" -eq 1 ] || return 0
+  local canon="${FLAG_CANON[$n]:-$n}"
+  [ -n "${USER_FLAG[$canon]:-}" ] && return 0
+  ARGS+=( "$n" "$@" )
+}
+
+# 2. 선택·계산 결과 — 직접 준 것이 있으면 LLAMA_ARGS 쪽에 이미 들어 있으므로 건너뛴다.
+[ -n "${USER_FLAG[--model]:-}" ]  || ARGS+=( -m "$MODEL_PATH" )
+if [ -n "${PROJ_PATH:-}" ] && [ -z "${USER_FLAG[--mmproj]:-}" ]; then
   ARGS+=( --mmproj "$PROJ_PATH" )
 fi
 ARGS+=( "${MTP_ARGS[@]}" )
-
-# CHOSEN_DEVICE가 비어있으면(CPU-only 빌드, 또는 디바이스 자동감지 실패) --device를
-# 아예 넘기지 않는다 — llama.cpp가 기본 동작(전체 디바이스 자동 사용 또는 CPU)에 위임.
-if [ -n "$CHOSEN_DEVICE" ]; then
+# CHOSEN_DEVICE 가 비어있으면(CPU-only 빌드, 또는 디바이스 자동감지 실패) --device 를
+# 아예 넘기지 않는다 — llama.cpp 가 기본 동작(전체 디바이스 자동 사용 또는 CPU)에 위임.
+if [ -n "$CHOSEN_DEVICE" ] && [ -z "${USER_FLAG[--device]:-}" ]; then
   ARGS+=( --device "$CHOSEN_DEVICE" )
 fi
+ARGS+=( "${C_ARGS[@]}" )
 
-# Flash Attention(-fa) & Q4 KV cache applies
-# --host 127.0.0.1: 로컬 전용 (외부 HTTP 차단 — 외부 접근은 Caddy HTTPS 사용)
-ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 "${C_ARGS[@]}" --parallel "$N_PARALLEL" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
-ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
+# 1. omakase
+om --port "$SERVER_PORT"
+om --host 127.0.0.1          # 로컬 전용 (외부 접근은 setup_secure_server.sh 의 Caddy HTTPS)
+om -ngl 99
+om -fa on
+om -ctk "$KV_TYPE"
+om -ctv "$KV_TYPE"
+om --parallel "$N_PARALLEL"
+om --reasoning on
+om --tools all
+om --ui-mcp-proxy            # 끄려면 --no-ui-mcp-proxy (llama.cpp 자체 플래그)
+om --repeat-penalty 1.1
+om --presence-penalty 0.1
+om --frequency-penalty 0.1
+om --repeat-last-n 256
 
-# ── 디스크 페이징 모드 (LAZY_MODE=auto|on|off) ──────────────────────────────
-# llama.cpp 는 세 조건이 **모두** 맞을 때만 텐서를 파일에 남긴다:
-#   ① 아키텍처가 그 텐서에 TENSOR_READ_LAZY 를 달았다 (qwen4exp 의 n-gram 테이블,
-#      gemma3n/gemma4 의 per-layer 임베딩 등. 전부 GET_ROWS 색인 텐서다)
-#   ② auto 면 그 텐서가 4 GiB 를 넘는다 (on 이면 크기 무시)
-#   ③ mmap 을 쓸 수 있다
-# 화이트리스트 방식이라 일반 dense 모델에서는 아무 일도 일어나지 않는다.
-# 끄고 싶으면 LAZY_MODE=off — 단, 대상 텐서가 크면 그만큼 RAM/VRAM 을 더 쓴다.
-case "$LAZY_MODE" in
-  auto) : ;;   # llama.cpp 기본값 — 플래그를 넘기지 않는다
-  on|off) ARGS+=( -lzm "$LAZY_MODE" ) ;;
-esac
+# 3. 사용자가 직접 준 플래그 (맨 뒤 = 최우선)
+ARGS+=( "${LLAMA_ARGS[@]}" )
 
-# ── 디스크 페이징 금지 플래그 가드 ──────────────────────────────────────────
-# 일부 아키텍처(qwen4exp 의 n-gram 테이블 등)는 36 GiB 짜리 텐서를 **파일에 둔 채**
-# 필요한 4 KB 행만 읽어 쓴다(llama.cpp 의 --lazy-mode, 기본값 auto).
-# 아래 플래그들은 그 텐서를 통째로 메모리로 끌어올리므로, 30 GiB RAM 에서는 즉사한다.
-# 이 스크립트가 직접 넣지는 않지만 EXTRA_ARGS 등으로 새어 들어올 수 있어 막는다.
-for _bad in "${ARGS[@]}"; do
-  case "$_bad" in
-    --no-mmap|--mlock)
-      echo "⛔ $_bad 는 쓸 수 없습니다 — 디스크 페이징이 죽고 큰 텐서를 RAM 으로 끌어올립니다."; exit 1 ;;
-    --load-mode)
-      echo "⛔ --load-mode 를 직접 지정하지 마세요 — mmap 이 아니면 페이징이 죽습니다."; exit 1 ;;
-  esac
-done
+if [ "$DRY_RUN" -eq 1 ]; then
+  echo ""
+  echo "── 최종 명령줄 (--dry-run: 실행하지 않음) ──"
+  printf 'LD_LIBRARY_PATH=%q \\\n  %q' "${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" "$SERVER_BIN"
+  for _x in "${ARGS[@]}"; do
+    # 플래그에서만 줄을 바꾼다 — 값은 그 플래그 뒤에 붙여야 읽힌다
+    case "$_x" in
+      -[A-Za-z-]*) printf ' \\\n    %q' "$_x" ;;
+      *)           printf ' %q' "$_x" ;;
+    esac
+  done
+  echo ""
+  exit 0
+fi
+
+# Start server
+echo "Starting llama-server with model: $MODEL_PATH"
 
 # [FIX] LD_LIBRARY_PATH는 여기, llama-server 프로세스 하나에만 적용한다(전역 export 아님).
 LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
@@ -1082,24 +1408,39 @@ if [ "$READY" -eq 1 ]; then
   # 로그의 'lazy read enabled' 줄은 기본 상세도에서 안 찍히므로 그것에 의존하지 않는다.
   # 대신 **파일 크기와 VRAM 사용량의 차이**로 본다: 가중치를 다 올렸다면 둘이 비슷하고,
   # 큰 텐서를 파일에 남겼다면 그만큼 벌어진다.
-  _vram_mib=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
-  if [ -n "${_vram_mib:-}" ] && [ "$model_mb" -gt 0 ]; then
-    _gap=$(( model_mb - _vram_mib ))
-    printf '모델 파일     : %.1f GiB   ·   VRAM 사용 %.1f GiB\n' \
-      "$(awk -v m="$model_mb" 'BEGIN{print m/1024}')" \
-      "$(awk -v m="$_vram_mib" 'BEGIN{print m/1024}')"
-    echo "페이징 모드   : --lazy-mode ${LAZY_MODE}  (LAZY_MODE 환경변수로 변경)"
+  #
+  # VRAM 사용량은 nvidia-smi 가 아니라 llama-server 자신의 --list-devices 로 읽는다.
+  # 이 스크립트는 CUDA/ROCm/Vulkan/Metal 어디서든 같이 동작해야 하므로 벤더 전용
+  # 도구에 의존하면 안 된다(AMD·Intel 박스에서는 이 줄이 통째로 사라져 버린다).
+  _vram_mb=""
+  _dev_line=$(LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
+                "$SERVER_BIN" --list-devices 2>/dev/null \
+              | grep -E "^[[:space:]]*${CHOSEN_DEVICE}:" || true)
+  if [[ "$_dev_line" =~ \(([0-9]+)[[:space:]]MiB,[[:space:]]([0-9]+)[[:space:]]MiB[[:space:]]free\) ]]; then
+    _vram_mb=$(( ${BASH_REMATCH[1]} - ${BASH_REMATCH[2]} ))
+  fi
+  _file_mb=$(( model_mb + proj_mb + mtp_mb ))
+  echo ""
+  if [ -n "$_vram_mb" ]; then
+    _gap=$(( _file_mb - _vram_mb ))
+    printf '모델 파일     : %s GiB   ·   VRAM 사용 %s GiB\n' \
+      "$(awk -v m="$_file_mb" 'BEGIN{printf "%.1f", m/1024}')" \
+      "$(awk -v m="$_vram_mb" 'BEGIN{printf "%.1f", m/1024}')"
+    echo "페이징 모드   : -lzm ${USER_VAL[--lazy-mode]:-auto}  (끄려면 -lzm off)"
     if [ "$_gap" -gt 4096 ]; then
-      printf '디스크 페이징 : ● 차이 %.1f GiB 가 파일에 남아 필요한 행만 읽힙니다 (--lazy-mode auto)\n' \
-        "$(awk -v g="$_gap" 'BEGIN{print g/1024}')"
+      printf '디스크 페이징 : ● 차이 %s GiB 가 파일에 남아 필요한 행만 읽힙니다\n' \
+        "$(awk -v g="$_gap" 'BEGIN{printf "%.1f", g/1024}')"
       echo "                이 텐서들은 VRAM·RAM 을 쓰지 않습니다. 남는 RAM 이 자동으로 캐시가 됩니다."
+      echo "                자세히는 docs/disk_paging/"
     else
       echo "디스크 페이징 : ○ 가중치가 모두 적재됐습니다 (페이징 대상 텐서가 없는 모델이면 정상)"
     fi
+  else
+    printf '모델 파일     : %s GiB\n' "$(awk -v m="$_file_mb" 'BEGIN{printf "%.1f", m/1024}')"
   fi
   if rss_kb=$(awk '/^VmRSS:/{print $2}' "/proc/$SERVER_PID/status" 2>/dev/null); then
-    printf '호스트 RSS    : %.1f GB   (페이지 캐시는 별도이며 메모리 압박 시 그냥 버려집니다)\n' \
-      "$(awk -v k="$rss_kb" 'BEGIN{print k/1048576}')"
+    printf '호스트 RSS    : %s GB   (페이지 캐시는 별도이며 메모리 압박 시 그냥 버려집니다)\n' \
+      "$(awk -v k="$rss_kb" 'BEGIN{printf "%.1f", k/1048576}')"
   fi
 elif kill -0 "$SERVER_PID" 2>/dev/null && [ "$WAITED" -ge "$MAX_WAIT" ]; then
   echo "Timeout(${MAX_WAIT}s): 아직 준비되지 않았지만 서버는 계속 로딩 중일 수 있습니다."
