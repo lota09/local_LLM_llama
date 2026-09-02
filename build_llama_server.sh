@@ -32,6 +32,88 @@ INSTALL_DIR_EXPLICIT=0
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 
 # ─────────────────────────────────────────────
+# 0. 명령행 인자
+# ─────────────────────────────────────────────
+# 이 스크립트는 원래 인자를 받지 않고 모든 것을 자동으로 결정했다. 그런데 자동으로는
+# 옳게 정할 수 없는 것이 두 가지 있다.
+#
+#   --ref
+#     "최신 릴리스"가 항상 원하는 판본은 아니다. llama.cpp 는 bNNNN CI 태그를
+#     하루에도 여러 번 찍는데, GitHub 의 /releases/latest 는 prerelease 를 건너뛰므로
+#     드물게 나오는 vX.Y.Z 만 잡힌다. 그래서 며칠 전에 머지된 새 모델 아키텍처가
+#     "최신 릴리스"에는 없는 상황이 실제로 생긴다(2026-08 기준 v0.3.0 vs b10717).
+#     그런 경우 브랜치나 bNNNN 태그를 직접 지목해야 한다.
+#
+#   --gpu-arch
+#     아키텍처 자동감지는 "빌드하는 이 머신에서 그 GPU 가 지금 보인다"를 전제한다.
+#     GPU 가 다른 작업에 물려 있거나 드라이버가 잠깐 어긋나면 에러 없이 조용히
+#     다른 결과(여러 아키텍처 팻 바이너리)가 나온다. 못박고 싶을 때 쓴다.
+#
+# 둘 다 지정하지 않으면 예전과 완전히 동일하게 동작한다.
+
+JOBS_EXPLICIT=""    # 사용자가 JOBS 를 직접 준 경우 메모리 기반 자동 감축을 하지 않는다
+[ -n "${JOBS:-}" ] && JOBS_EXPLICIT=1
+
+CLONE_REF=""        # 미지정 → 1번 섹션에서 최신 릴리스 태그를 조회한다
+GPU_ARCH_OPT=""     # 미지정 → 백엔드별 자동감지에 맡긴다
+
+usage() {
+  cat <<EOF
+사용법: $(basename "${BASH_SOURCE[0]}") [옵션]
+
+옵션:
+  --ref <REF>          빌드할 llama.cpp 판본(브랜치 / 태그 / 커밋). 지정하면
+                       GitHub 릴리스 조회를 건너뛴다(오프라인에서도 동작).
+                       미지정 시: 최신 정식 릴리스 태그를 자동 조회.
+                       예) --ref master   --ref b10717   --ref v0.3.0
+
+  --gpu-arch <ARCH>    타겟 GPU 아키텍처를 못박는다. 백엔드에 따라 해석이 다르다.
+                         CUDA → -DCMAKE_CUDA_ARCHITECTURES  (예: 80, "80;86", native)
+                         ROCm → -DGPU_TARGETS / -DCMAKE_HIP_ARCHITECTURES (예: gfx906)
+                         Vulkan/Metal/CPU → 해당 개념 없음. 경고 후 무시.
+                       미지정 시: 백엔드가 알아서 감지한다(현행 동작).
+
+  -h, --help           이 도움말
+
+설치 위치:
+  기본값은 llama_server_<백엔드> 이고, 위 옵션을 "명시적으로" 준 경우에만
+  접미사가 붙어 기존 빌드를 덮어쓰지 않는다.
+      llama_server_cuda              (옵션 없음)
+      llama_server_cuda_master       (--ref master)
+      llama_server_cuda-sm80         (--gpu-arch 80)
+      llama_server_cuda-sm80_master  (둘 다)
+  INSTALL_DIR 환경변수를 주면 그 값이 무조건 우선한다.
+
+주요 환경변수(기존 그대로):
+  REPO_URL  BUILD_DIR  INSTALL_DIR  GGML_BACKEND(cuda|hip|vulkan|metal|cpu)
+  NONINTERACTIVE=1  JOBS  ROCM_ROOT
+EOF
+}
+
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --ref)        [ $# -ge 2 ] || { echo "Error: --ref 에 값이 필요합니다" >&2; exit 1; }
+                  CLONE_REF="$2"; shift 2 ;;
+    --ref=*)      CLONE_REF="${1#*=}"; shift ;;
+    --gpu-arch)   [ $# -ge 2 ] || { echo "Error: --gpu-arch 에 값이 필요합니다" >&2; exit 1; }
+                  GPU_ARCH_OPT="$2"; shift 2 ;;
+    --gpu-arch=*) GPU_ARCH_OPT="${1#*=}"; shift ;;
+    -h|--help)    usage; exit 0 ;;
+    *)            echo "Error: 알 수 없는 인자: $1" >&2; echo "" >&2; usage >&2; exit 1 ;;
+  esac
+done
+
+# 디렉터리 이름에 넣어도 안전한 형태로 다듬는다.
+# 구분 문자(/ ; , : 공백)는 하이픈으로, 나머지 특수문자는 버린다.
+#   feat/foo → feat-foo   ·   "80;86" → 80-86
+_sanitize_tag() { printf '%s' "$1" | tr '/;,: ' '-----' | tr -cd 'A-Za-z0-9._-'; }
+
+# ref 접미사는 여기서 확정된다 — "사용자가 --ref 를 준 경우"에만 값이 생기므로,
+# 자동 조회로 정해진 릴리스 태그는 디렉터리 이름에 영향을 주지 않는다(기존 경로 유지).
+REF_TAG=""
+[ -n "$CLONE_REF" ] && REF_TAG="$(_sanitize_tag "$CLONE_REF")"
+
+# ─────────────────────────────────────────────
 # 유틸: 섹션 헤더 출력
 # ─────────────────────────────────────────────
 section() { echo ""; echo "── $* ──"; }
@@ -62,16 +144,26 @@ echo "Platform: OS=$OS_NAME ARCH=$ARCH_NAME"
 # ─────────────────────────────────────────────
 # 1. 최신 릴리즈 태그 자동 감지
 # ─────────────────────────────────────────────
-section "1. 최신 릴리즈 태그 확인"
-LATEST_TAG=$(fetch_stdout "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest" \
-  | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/' || true)
-
-if [ -z "$LATEST_TAG" ]; then
-  echo "Warning: GitHub API 응답 실패(또는 curl/wget 없음) → 'master' 브랜치로 폴백"
-  CLONE_REF="master"
+section "1. 빌드할 판본 결정"
+if [ -n "$CLONE_REF" ]; then
+  # 사용자가 --ref 로 지목했다 → 네트워크 조회 자체가 불필요하다(오프라인 대응).
+  echo "판본 지정됨 (--ref): $CLONE_REF"
+  echo "  → 릴리스 태그 자동 조회를 건너뜁니다."
 else
-  echo "Latest release: $LATEST_TAG"
-  CLONE_REF="$LATEST_TAG"
+  # [주의] 이 엔드포인트는 prerelease 를 건너뛴다. llama.cpp 는 CI 가 찍는 bNNNN 태그를
+  # 하루에도 여러 번 올리지만 그것들은 prerelease 라서 여기에 안 잡히고, 드물게 나오는
+  # vX.Y.Z 만 잡힌다. 즉 여기서 얻는 값은 "가장 최근 커밋"이 아니라 "가장 최근 정식
+  # 릴리스"이며, 둘 사이가 며칠씩 벌어질 수 있다. 갓 머지된 기능이 필요하면 --ref 를 쓴다.
+  LATEST_TAG=$(fetch_stdout "https://api.github.com/repos/ggerganov/llama.cpp/releases/latest" \
+    | grep '"tag_name"' | head -n1 | sed 's/.*"tag_name": *"\(.*\)".*/\1/' || true)
+
+  if [ -z "$LATEST_TAG" ]; then
+    echo "Warning: GitHub API 응답 실패(또는 curl/wget 없음) → 'master' 브랜치로 폴백"
+    CLONE_REF="master"
+  else
+    echo "Latest release: $LATEST_TAG  (prerelease 인 bNNNN 태그는 제외된 값)"
+    CLONE_REF="$LATEST_TAG"
+  fi
 fi
 
 echo "Repo     : $REPO_URL (ref: $CLONE_REF)"
@@ -365,7 +457,16 @@ ROCM_ROOT=""
 ROCM_CMAKE_DIR=""     # hip/hipblas/rocblas cmake 패키지들의 부모 디렉터리
 ROCM_ROCBLAS_DIR=""   # rocBLAS Tensile 커널 데이터 루트 (아래에 library/ 가 있음)
 ROCM_CLANGXX=""       # HIP 를 컴파일할 수 있는 clang++
-GPU_ARCH=""
+
+# GPU_ARCH 는 아래 (i)(ii)(iii) 단계로 자동감지하지만, --gpu-arch 로 gfx 계열 값을
+# 받았다면 그것이 최우선이고 감지 단계는 통째로 건너뛴다.
+# gfx 로 시작하지 않는 값(예: CUDA 의 80)은 여기서 받지 않는다 — 그런 값이 흘러들면
+# 아래 rocBLAS 커널 지원 검사가 존재하지 않는 아키텍처를 찾다가 엉뚱하게 실패한다.
+# CUDA 쪽 해석은 백엔드 플래그 섹션에서 따로 한다.
+case "${GPU_ARCH_OPT:-}" in
+  gfx*) GPU_ARCH="$GPU_ARCH_OPT" ;;
+  *)    GPU_ARCH="" ;;
+esac
 
 # [FIX] "커널 파일 이름에 gfx906 이 있느냐"만으로 지원 여부를 판정하면 안 된다.
 # ROCm 7.x 에 generic 코드 오브젝트가 생겼기 때문이다. gfx9-generic 하나가
@@ -478,8 +579,15 @@ if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$OS_NAME" = "Linux" ]; 
   GFX_RE='gfx[0-9]{2,}[a-z]?'
   _gfx_of() { grep -v -- '-generic' | grep -oE "$GFX_RE" | head -n1; }
 
+  # [--gpu-arch] 지정값이 있으면 (i)(ii)(iii) 어느 단계도 돌리지 않는다.
+  # (ii)(iii) 은 원래부터 -z 가드가 있었지만 (i) 은 없어서 지정값을 덮어썼다.
+  if [ -n "$GPU_ARCH" ]; then
+    echo "GPU 아키텍처 지정됨 (--gpu-arch): $GPU_ARCH — 자동감지를 건너뜁니다."
+  fi
+
   # (i) rocminfo — 가장 상세하지만 /dev/kfd 를 열어야 해서 render 그룹이 현재 셸에
   #     반영돼 있어야 한다(usermod 직후 재로그인 전에는 실패한다).
+  if [ -z "$GPU_ARCH" ]; then
   for ri in /opt/rocm*/bin/rocminfo "$(command -v rocminfo 2>/dev/null || true)"; do
     [ -n "$ri" ] && [ -x "$ri" ] || continue
     GPU_ARCH=$("$ri" 2>/dev/null | _gfx_of || true)
@@ -491,6 +599,7 @@ if [ "$USE_METAL" -eq 0 ] && [ "$USE_CUDA" -eq 0 ] && [ "$OS_NAME" = "Linux" ]; 
     fi
     [ -n "$GPU_ARCH" ] && break
   done
+  fi
 
   # (ii) [FIX] rocminfo 가 막혀도 아키텍처를 알아낼 수 있다. amdgpu-arch(LLVM)와
   #      rocm_agent_enumerator 는 /dev/kfd 없이 /sys 만으로 답한다. 실제로 이 경로
@@ -775,8 +884,26 @@ elif [ "$USE_METAL"  -eq 1 ]; then BACKEND_TAG="metal"
 else                               BACKEND_TAG="$ARCH_NAME"   # 예: x86_64, aarch64
 fi
 
+# --gpu-arch 접미사는 그 값을 "실제로 쓰는" 백엔드에서만 붙인다.
+# Vulkan/Metal/CPU 는 아키텍처 개념이 없어 값을 무시하므로, 이름에 붙이면
+# 디렉터리가 하지도 않은 일을 주장하게 된다.
+ARCH_TAG=""
+if [ -n "$GPU_ARCH_OPT" ]; then
+  if [ "$USE_CUDA" -eq 1 ] || [ "$USE_ROCM" -eq 1 ]; then
+    _at="$(_sanitize_tag "$GPU_ARCH_OPT")"
+    case "$_at" in
+      [0-9]*) ARCH_TAG="sm${_at}" ;;   # CUDA 는 숫자로 준다: 80 → sm80, "80;86" → sm80-86
+      *)      ARCH_TAG="$_at"     ;;   # ROCm 의 gfx906, CUDA 의 native 등은 그대로
+    esac
+  else
+    echo "⚠️  --gpu-arch=$GPU_ARCH_OPT 는 ${BACKEND_TAG} 백엔드에 해당 개념이 없어 무시합니다."
+  fi
+fi
+
+# 최종 이름 규칙:  llama_server_<백엔드>[-<아키텍처>][_<ref>]
+# 옵션을 하나도 안 주면 접미사가 없어 예전 경로(llama_server_cuda)와 같다.
 if [ "$INSTALL_DIR_EXPLICIT" -eq 0 ]; then
-  INSTALL_DIR="${SCRIPT_DIR}/llama_server_${BACKEND_TAG}"
+  INSTALL_DIR="${SCRIPT_DIR}/llama_server_${BACKEND_TAG}${ARCH_TAG:+-${ARCH_TAG}}${REF_TAG:+_${REF_TAG}}"
 fi
 BACKUP_DIR=${BACKUP_DIR:-${INSTALL_DIR}_backup_$(date +%s)}
 echo "설치 위치: $INSTALL_DIR"
@@ -948,6 +1075,18 @@ fi
 if [ "$USE_CUDA" -eq 1 ]; then
   echo "CUDA 빌드 활성화: -DGGML_CUDA=ON"
   CMAKE_ARGS+=(-DGGML_CUDA=ON)
+
+  # 아키텍처를 지정하지 않으면 llama.cpp 가 알아서 정한다. GGML_NATIVE(기본 ON) 과
+  # CUDA>=11.6 · CMake>=3.24 가 만족되면 "native" 를 골라 빌드 머신에 꽂힌 GPU 만
+  # 컴파일한다 — 보통 이게 가장 빠르고 정확하다. 다만 그건 빌드 시점에 GPU 가
+  # 보인다는 뜻이고, 안 보이면 조용히 여러 아키텍처 팻 바이너리로 떨어진다.
+  # 결과를 못박고 싶을 때만 --gpu-arch 로 값을 준다.
+  if [ -n "${GPU_ARCH_OPT:-}" ]; then
+    echo "  타겟 CUDA 아키텍처 고정: $GPU_ARCH_OPT (--gpu-arch)"
+    CMAKE_ARGS+=(-DCMAKE_CUDA_ARCHITECTURES="$GPU_ARCH_OPT")
+  else
+    echo "  타겟 CUDA 아키텍처: llama.cpp 자동 결정 (GGML_NATIVE → 이 머신의 GPU)"
+  fi
   [ -n "$NVCC_BIN" ] && CMAKE_ARGS+=(-DCMAKE_CUDA_COMPILER="$NVCC_BIN")
 
   CUDA_PREFIX="$(dirname "$(dirname "$NVCC_BIN")")"
@@ -1079,7 +1218,27 @@ case "$ARCH_NAME" in
     ;;
 esac
 
-JOBS=$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
+# [FIX] JOBS 는 도움말에 환경변수로 적혀 있었지만 여기서 무조건 덮어써서 밖에서 줄 수
+# 없었다(CLONE_REF · GPU_ARCH 와 같은 실수). 지정하지 않았을 때만 코어 수로 정한다.
+JOBS=${JOBS:-$(nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)}
+
+# CUDA 빌드는 잡 하나당 메모리를 많이 먹는다. ggml-cuda 의 fattn/mmq 템플릿 인스턴스화는
+# nvcc 프로세스 하나가 2 GB 이상을 쓰는 일이 흔해서, 코어 수만 보고 -j 를 정하면 RAM 이
+# 작은 머신에서 링크 직전에 OOM 킬로 죽는다. 40분 컴파일한 뒤에 죽는 게 최악이므로,
+# "가용 메모리 ÷ 2 GB" 로 상한을 둔다. 올리지는 않고 내리기만 하며, JOBS 를 명시했으면
+# 사용자의 판단을 존중해 건드리지 않는다.
+if [ -z "${JOBS_EXPLICIT:-}" ] && [ "$USE_CUDA" -eq 1 ] && [ -r /proc/meminfo ]; then
+  _avail_kb=$(awk '/^MemAvailable:/{print $2}' /proc/meminfo 2>/dev/null || echo 0)
+  if [ "${_avail_kb:-0}" -gt 0 ]; then
+    _cap=$(( _avail_kb / 2097152 ))          # 잡당 2 GiB
+    [ "$_cap" -lt 1 ] && _cap=1
+    if [ "$_cap" -lt "$JOBS" ]; then
+      echo "가용 메모리 $(( _avail_kb / 1048576 )) GiB → CUDA 빌드 잡을 $JOBS 에서 $_cap 로 낮춥니다."
+      echo "  (잡당 약 2 GiB 가정. 더 쓰고 싶으면 JOBS=<n> 으로 명시하세요.)"
+      JOBS=$_cap
+    fi
+  fi
+fi
 echo "병렬 빌드 잡: $JOBS"
 
 # 링커 플래그는 호스트 툴체인을 확정한 뒤 아래에서 추가한다.
@@ -1337,7 +1496,24 @@ if [ -d "$BUILD_DIR" ]; then
 fi
 
 echo "Cloning (depth=1, ref=$CLONE_REF)..."
-git clone --depth 1 --branch "$CLONE_REF" "$REPO_URL" "$BUILD_DIR"
+# --branch 는 브랜치와 태그만 받는다. 커밋 SHA 를 주면 "Remote branch not found" 로
+# 죽으므로, 실패하면 init+fetch 로 그 커밋만 얕게 받아온다.
+if ! git clone --depth 1 --branch "$CLONE_REF" "$REPO_URL" "$BUILD_DIR"; then
+  echo "  --branch 로 못 잡았습니다 (커밋 SHA 는 이 방식이 안 됩니다) → fetch 로 재시도"
+  rm -rf "$BUILD_DIR"
+  mkdir -p "$BUILD_DIR"
+  git -C "$BUILD_DIR" init -q
+  git -C "$BUILD_DIR" remote add origin "$REPO_URL"
+  git -C "$BUILD_DIR" fetch --depth 1 origin "$CLONE_REF"
+  git -C "$BUILD_DIR" checkout -q FETCH_HEAD
+fi
+
+# 무엇을 빌드했는지는 여기서만 확실히 알 수 있다. ref 가 'master' 같은 움직이는
+# 이름이면 이름만으로는 몇 달 뒤에 재현이 안 되므로 커밋을 함께 남긴다.
+BUILT_SHA=$(git -C "$BUILD_DIR" rev-parse HEAD 2>/dev/null || echo unknown)
+BUILT_SHA_SHORT=$(git -C "$BUILD_DIR" rev-parse --short=12 HEAD 2>/dev/null || echo unknown)
+BUILT_COMMIT_DATE=$(git -C "$BUILD_DIR" log -1 --format=%cI 2>/dev/null || echo unknown)
+echo "커밋: $BUILT_SHA_SHORT  ($BUILT_COMMIT_DATE)"
 
 # ─────────────────────────────────────────────
 # 5b. ROCm 6.2 FP8 타입 불일치 자동 패치
@@ -1607,6 +1783,99 @@ else
 fi
 
 # ─────────────────────────────────────────────
+# 9c. 설치본 실행 검증
+# ─────────────────────────────────────────────
+# 바로 위의 ldd 검사는 "필요한 .so 파일이 있느냐"만 본다. 심볼이 안 맞거나
+# 가속 백엔드 라이브러리가 깨져 있어도 그 검사는 통과한다(백엔드 .so 는 dlopen 이라
+# 애초에 ldd 에 안 잡힌다). 그래서 실제로 두 번 실행해 본다.
+#   --version       : 링크·심볼이 온전한가 (여기서 죽으면 설치본은 못 쓴다)
+#   --list-devices  : 가속 백엔드가 런타임에 실제로 열려 장치를 열거하는가
+# 두 명령 모두 모델 없이 즉시 끝나므로 어떤 백엔드에서도 안전하다.
+section "9c. 설치본 실행 검증"
+
+VERIFY_FAIL=0
+_run_installed() { LD_LIBRARY_PATH="$INSTALL_DIR:${LD_LIBRARY_PATH:-}" "$TARGET_BIN" "$@" 2>&1; }
+_indent() { sed 's/^/  /'; }
+
+if VER_OUT=$(_run_installed --version); then
+  _indent <<<"$VER_OUT"
+else
+  echo "❌ '$TARGET_BIN --version' 이 실패했습니다. 설치본이 실행 불가 상태입니다:" >&2
+  _indent >&2 <<<"$VER_OUT"
+  VERIFY_FAIL=1
+fi
+
+DEV_OUT=""
+if [ "$VERIFY_FAIL" -eq 0 ]; then
+  if DEV_OUT=$(_run_installed --list-devices); then
+    _indent <<<"$DEV_OUT"
+    # GPU 백엔드로 빌드했는데 장치가 하나도 안 잡히면 빌드는 성공해도 실사용은 못 한다.
+    # (드라이버 미로딩, 권한, 아키텍처 불일치 등) 실패로 처리하진 않는다 — 다른 머신에
+    # 배포할 목적으로 빌드하는 경우가 있기 때문이다.
+    if [ "$BACKEND_TAG" != "cpu" ] && [ "$BACKEND_TAG" != "$ARCH_NAME" ]; then
+      if ! grep -qE '^[[:space:]]*(CUDA|ROCm|HIP|Vulkan|Metal)[0-9]*:' <<<"$DEV_OUT"; then
+        echo "⚠️  ${BACKEND_TAG} 로 빌드했지만 가속 장치가 열거되지 않았습니다."
+        echo "    (이 머신에서 바로 쓸 계획이라면 드라이버/권한/아키텍처를 확인하세요)"
+      fi
+    fi
+  else
+    echo "⚠️  '--list-devices' 가 실패했습니다 (구버전 llama.cpp 이거나 백엔드 초기화 실패):"
+    _indent <<<"$DEV_OUT"
+  fi
+fi
+
+# ─────────────────────────────────────────────
+# 9d. BUILD_INFO 기록
+# ─────────────────────────────────────────────
+# 설치 디렉터리가 여러 개 생기면(백엔드별 · --ref/--gpu-arch 별) 어느 폴더가 무엇인지
+# 화면 로그로는 알 수 없다. 폴더를 열었을 때 그 자리에서 답이 나오게 같이 넣어 둔다.
+section "9d. BUILD_INFO 기록"
+
+# 실제로 어떤 GPU 아키텍처가 들어갔는지는 산출물을 직접 까서 확인한다
+# (요청값이 아니라 결과값 — 자동 결정이었을 때 특히 이것만이 사실이다).
+BUILT_ARCHES="(확인 불가)"
+if [ "$USE_CUDA" -eq 1 ] && [ -n "${NVCC_BIN:-}" ]; then
+  _cuobjdump="$(dirname "$NVCC_BIN")/cuobjdump"
+  if [ -x "$_cuobjdump" ] && [ -e "$INSTALL_DIR/libggml-cuda.so" ]; then
+    BUILT_ARCHES=$("$_cuobjdump" --list-elf "$INSTALL_DIR/libggml-cuda.so" 2>/dev/null \
+      | grep -oE 'sm_[0-9]+[a-z]?' | sort -u | tr '\n' ' ' || true)
+    [ -n "$BUILT_ARCHES" ] || BUILT_ARCHES="(확인 불가)"
+  fi
+elif [ "$USE_ROCM" -eq 1 ]; then
+  BUILT_ARCHES="${GPU_ARCH:-(미지정)}"
+fi
+
+{
+  echo "# llama.cpp 빌드 정보 — build_llama_server.sh 가 생성"
+  echo ""
+  echo "빌드 시각      : $(date -Is)"
+  echo "빌드 호스트    : $(uname -srm) / $(hostname 2>/dev/null || echo '?')"
+  echo ""
+  echo "저장소         : $REPO_URL"
+  echo "ref            : $CLONE_REF${REF_TAG:+  (--ref 로 지정)}"
+  echo "커밋           : $BUILT_SHA"
+  echo "커밋 시각      : $BUILT_COMMIT_DATE"
+  echo ""
+  echo "백엔드         : $BACKEND_TAG"
+  echo "GPU 아키텍처   : 요청=${GPU_ARCH_OPT:-(자동)}  실측=${BUILT_ARCHES}"
+  echo "C++ 컴파일러   : ${HOST_CXX:-(cmake 기본)}"
+  [ -n "${NVCC_BIN:-}" ]      && echo "nvcc           : $NVCC_BIN ($("$NVCC_BIN" --version 2>/dev/null | sed -n 's/.*release \([0-9.]*\).*/\1/p' | head -1))"
+  [ -n "${ROCM_ROOT:-}" ]     && echo "ROCm           : $ROCM_ROOT"
+  echo "cmake          : $CMAKE_BIN ($("$CMAKE_BIN" --version 2>/dev/null | head -1))"
+  echo ""
+  echo "cmake 인자     :"
+  printf '  %s\n' "${CMAKE_ARGS[@]}"
+  echo ""
+  echo "--version      :"
+  _indent <<<"${VER_OUT:-(실패)}"
+  echo ""
+  echo "--list-devices :"
+  _indent <<<"${DEV_OUT:-(없음)}"
+} > "$INSTALL_DIR/BUILD_INFO"
+
+echo "기록 완료: $INSTALL_DIR/BUILD_INFO"
+
+# ─────────────────────────────────────────────
 # 9b. 디스크 동기화 (크래시 대비)
 # ─────────────────────────────────────────────
 # cp로 설치한 바이너리/라이브러리는 이 시점에 "디스크에 실제로 써졌다"는 보장이 없다 —
@@ -1635,9 +1904,10 @@ echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 echo " Build & install complete!"
 echo "  Binary  : $TARGET_BIN"
-echo "  Version : $CLONE_REF"
-echo "  Arch    : $ARCH_NAME"
+echo "  Version : $CLONE_REF ($BUILT_SHA_SHORT)"
+echo "  Arch    : $ARCH_NAME${BUILT_ARCHES:+  ·  GPU: $BUILT_ARCHES}"
 echo "  Backend : $BACKEND_LABEL"
+echo "  Info    : $INSTALL_DIR/BUILD_INFO"
 echo ""
 echo " 실행: ./run_llama_server.sh"
 echo "  (라이브러리 경로는 그 스크립트가 llama-server 프로세스 하나에만"
@@ -1645,3 +1915,10 @@ echo "   한정해서 자동으로 적용합니다 — 전역 export 아님)"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
 
 exit 0
+
+if [ "${VERIFY_FAIL:-0}" -ne 0 ]; then
+  echo ""
+  echo "❌ 설치본 실행 검증에 실패했습니다 (9c 참고)." >&2
+  echo "   파일은 위 경로에 있지만 실행되지 않는 상태이므로 그대로 쓰면 안 됩니다." >&2
+  exit 1
+fi

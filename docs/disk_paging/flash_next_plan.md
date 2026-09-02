@@ -125,41 +125,68 @@ mmap 으로 열려 있고, 커널이 남는 RAM(vLLM 내리면 ~26 GiB)을 페�
 
 ### 4.1 요구사항
 
-- **llama.cpp master, 2026-08-27 이후.** [PR #27742](https://github.com/ggml-org/llama.cpp/pull/27742)
-  (`qwen4_exp` 아키텍처 · QSA · GDN · PLE)가 그날 머지됐다. 릴리스 태그로는 못 잡을 수 있다.
+- **PR [#27742](https://github.com/ggml-org/llama.cpp/pull/27742) 이후 판본.**
+  `qwen4exp` 아키텍처 · QSA · GDN · PLE 가 **2026-08-27 19:32** 에 머지됐다(`6c84c7d5`).
 - CUDA: nvcc 13.3 (miniconda) · gcc 15.2 (CUDA 13.3 은 gcc ≤15 허용)
-- 아키텍처: **`CMAKE_CUDA_ARCHITECTURES=80`**
+- 아키텍처: **sm_80**
 
-### 4.2 명령
+**아키텍처 이름은 `qwen4exp` 다 — 밑줄이 없다.** `qwen4_exp` 는 HF 쪽 `model_type` 이고,
+llama.cpp 의 GGUF `general.architecture` 값은 `src/llama-arch.cpp:43` 의 `"qwen4exp"` 다.
+검색할 때 이걸 틀리면 정상 빌드에서도 0건이 나온다.
 
-기존 `~/Developments/llamacpp/build_llama_server.sh` 는 **최신 릴리스 태그**를 받는다.
-master 를 강제해야 한다:
+### 4.2 어느 판본을 받는가 — 릴리스로는 안 된다 (확인함)
+
+llama.cpp 태그는 두 종류다. CI 가 하루에도 여러 번 찍는 `bNNNN` 은 **prerelease** 라
+GitHub `/releases/latest` 에 안 잡히고, 드물게 나오는 `vX.Y.Z` 만 잡힌다.
+`build_llama_server.sh` 는 그 엔드포인트를 쓴다 → **`v0.3.0` (2026-08-25)** 을 받는다.
+머지보다 이틀 빠르다. 소스에서 직접 셌다:
+
+| ref | 날짜 | `src/llama-arch.cpp` 의 `qwen4exp` |
+|:---|:---|---:|
+| `v0.3.0` ← 옵션 없이 돌리면 이것 | 2026-08-25 | **0 — 안 됨** |
+| `b10717` | 2026-08-31 | 1 ✅ |
+| `master` | (매일 이동) | 1 ✅ |
+
+**`b10717` 같은 bNNNN 태그를 박는다.** `master` 는 내일 받으면 다른 코드라 §11 의
+기록이 재현 불가능해진다.
+
+### 4.3 명령
 
 ```bash
 cd ~/Developments/llamacpp
-CLONE_REF=master ./build_llama_server.sh
+./build_llama_server.sh --ref b10717 --gpu-arch 80
 ```
 
-스크립트가 안 먹으면 직접:
-
-```bash
-git clone https://github.com/ggml-org/llama.cpp /tmp/llama_build && cd /tmp/llama_build
-cmake -B build -DGGML_CUDA=ON -DCMAKE_CUDA_ARCHITECTURES=80 \
-      -DCMAKE_BUILD_TYPE=Release -DLLAMA_CURL=ON
-cmake --build build --config Release -j8
-```
+- `--ref` / `--gpu-arch` 는 **인자**다(환경변수 아님). 예전 문서의 `CLONE_REF=master` 는
+  스크립트가 읽지 않아 조용히 무시됐다 — 지금은 인자로 받는다.
+- 설치 위치는 두 옵션을 준 흔적이 이름에 남는다 → **`llama_server_cuda-sm80_b10717`**.
+  기존 `llama_server_cuda`(안정 릴리스본)를 덮어쓰지 않는다.
+- `--gpu-arch 80` 은 사실 생략해도 된다. llama.cpp 가 `GGML_NATIVE` 로 이 머신의 GPU 를
+  보고 sm_80 하나만 만든다(현 설치본을 `cuobjdump --list-elf` 로 확인함). 다만 그건
+  **빌드 시점에 GPU 가 보일 때**만 성립하므로 못박는 편이 안전하다.
+- 백엔드 선택 프롬프트를 건너뛰려면 `GGML_BACKEND=cuda NONINTERACTIVE=1` 을 앞에 붙인다.
 
 ⛔ **`apt` 로 kernel / `nvidia-*` 를 건드리지 않는다** — 언락이 소멸한다
 ([`hardware.md`](hardware.md) 최상단). cmake·gcc·smartmontools 는 무관하므로 안전하다.
 
-### 4.3 확인
+### 4.4 확인
+
+스크립트가 끝에서 **자동으로** 실행 검증을 한다(9c): `--version` 으로 링크·심볼을,
+`--list-devices` 로 CUDA 백엔드가 실제로 장치를 잡는지 본다. 실패하면 exit 1 이다.
+빌드한 커밋·실측 sm 아키텍처·cmake 인자는 `llama_server_cuda-sm80_b10717/BUILD_INFO`
+에 남으므로 §11 기록에 그대로 옮기면 된다.
+
+아키텍처 지원 여부만 직접 볼 거라면:
 
 ```bash
-./build/bin/llama-server --version
-strings build/bin/llama-server | grep -i qwen4_exp   # 아키텍처가 들어갔는지
+strings llama_server_cuda-sm80_b10717/libllama.so* | grep -x qwen4exp
 ```
 
-`qwen4_exp` 가 안 나오면 **빌드가 PR 이전 커밋이다.** 여기서 멈추고 ref 를 다시 잡는다.
+⚠️ **`llama-server` 를 뒤지면 안 된다.** 그 실행파일은 `main.cpp` 하나뿐인 17 KB 짜리
+런처이고(`tools/server/CMakeLists.txt`), 아키텍처 이름표는 `libllama.so` 에 있다.
+리눅스는 `BUILD_SHARED_LIBS` 가 기본 ON 이라 이 구조가 유지된다.
+
+안 나오면 **ref 가 PR 이전이다.** 여기서 멈추고 §4.2 표로 돌아간다.
 
 ## 5. 기동
 
@@ -213,7 +240,7 @@ nvidia-smi                     # vLLM 이 56 GiB 물고 있으면 먼저 내린�
 
 | | 게이트 | 통과 기준 | 실패 시 |
 |:---|:---|:---|:---|
-| **G0** | 빌드 | `strings llama-server \| grep qwen4_exp` 가 잡힌다 | ref 를 master 로 다시 |
+| **G0** | 빌드 | 스크립트 9c 검증 통과 + `strings libllama.so* \| grep -x qwen4exp` 가 잡힌다 | ref 를 `b10717` 이상으로 다시 (§4.2) |
 | **G1** | 다운로드 | 3.84bpw 84.9 GB · 샤드 해시 일치 | 재개 다운로드 |
 | **G2** | 로딩 | OOM 없이 서버가 ready. `nvidia-smi` VRAM ≈ 46 GiB, **RSS 가 40 GB 를 안 넘는다** | RSS 가 크면 mmap 이 안 걸린 것 — 금지 플래그 확인 |
 | **G3** | 정합성 | 짧은 프롬프트가 **한국어·영어로 말이 되는 출력**. 반복·깨짐 없음 | IQ4_XS CUDA 경로 의심 → 4.27bpw Q4_K_M 로 교체 |
@@ -287,7 +314,7 @@ M5(히트율)와 함께 이 표의 어느 줄에 앉는지 알려준다.
 
 ```
 날짜        2026-__-__
-빌드        llama.cpp <sha> · CUDA 13.3 · sm_80
+빌드        llama.cpp <sha> · CUDA 13.3 · sm_80      ← 설치 디렉터리의 BUILD_INFO 에서 복사
 모델        AD-_.__bpw-____  (파일 __._ GB)
 플래그      -ngl 99 -ot "per_layer_token_embd.weight=CPU" -c _____
 전력캡      ___ W   ·   SM ____ MHz   ·   코어 __°C / HBM __°C

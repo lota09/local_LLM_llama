@@ -1,0 +1,1369 @@
+<title>초당 3 메가바이트</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600&family=Noto+Serif+KR:wght@600;700&display=swap">
+
+<style>
+  :root {
+    --paper:    #f3f1ed;
+    --surface:  #fbfaf8;
+    --sunken:   #e9e6e0;
+    --ink:      #1b1c1a;
+    --ink2:     #5b5e59;
+    --ink3:     #8c9089;
+    --line:     #dcd9d2;
+    --rule:     #bdb9b0;
+    --measured: #0d6b60;
+    --derived:  #98511f;
+    --meas-bg:  #e2eeec;
+    --deri-bg:  #f2e7dc;
+    --s1:       #2a78d6;   /* NVMe */
+    --s2:       #eb6834;   /* HDD */
+    color-scheme: light;
+
+    --f-head: "Noto Serif KR", "Apple SD Gothic Neo", serif;
+    --f-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    --f-mono: "IBM Plex Mono", ui-monospace, Menlo, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --paper: #151614; --surface: #1c1e1b; --sunken: #24261f;
+      --ink: #e9eae4; --ink2: #9ba099; --ink3: #6e736c;
+      --line: #2e312b; --rule: #40443c;
+      --measured: #52b7a8; --derived: #d8935a;
+      --meas-bg: #16302c; --deri-bg: #33251a;
+      --s1: #3987e5; --s2: #d95926;
+      color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --paper: #151614; --surface: #1c1e1b; --sunken: #24261f;
+    --ink: #e9eae4; --ink2: #9ba099; --ink3: #6e736c;
+    --line: #2e312b; --rule: #40443c;
+    --measured: #52b7a8; --derived: #d8935a;
+    --meas-bg: #16302c; --deri-bg: #33251a;
+    --s1: #3987e5; --s2: #d95926;
+    color-scheme: dark;
+  }
+
+  body { background: var(--paper); color: var(--ink); font-family: var(--f-body);
+         font-size: 16px; line-height: 1.68; -webkit-font-smoothing: antialiased; }
+  .wrap { max-width: 51rem; margin: 0 auto; padding: 0 1.4rem 6rem; }
+
+  header { padding: 4rem 0 1.6rem; border-bottom: 2.5px solid var(--ink); }
+  .kicker { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .16em;
+            text-transform: uppercase; color: var(--measured); margin-bottom: 1rem; }
+  h1 { font-family: var(--f-head); font-weight: 700; font-size: clamp(2rem, 5.5vw, 2.9rem);
+       line-height: 1.14; letter-spacing: -.015em; text-wrap: balance; margin-bottom: .9rem; }
+  .sub { font-size: 1.02rem; color: var(--ink2); max-width: 40rem; }
+  .byline { font-family: var(--f-mono); font-size: .74rem; color: var(--ink3);
+            margin-top: 1.3rem; line-height: 1.9; }
+
+  .abstract { background: var(--surface); border: 1px solid var(--line); border-radius: 4px;
+              padding: 1.3rem 1.4rem; margin: 2rem 0 2.6rem; font-size: .95rem; }
+  .abstract h2 { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .14em;
+                 text-transform: uppercase; color: var(--ink3); margin-bottom: .7rem;
+                 border: 0; padding: 0; }
+  .abstract p { margin-bottom: .7rem; }
+  .abstract p:last-child { margin-bottom: 0; }
+
+  h2 { font-family: var(--f-head); font-weight: 700; font-size: 1.42rem; letter-spacing: -.01em;
+       margin: 3.2rem 0 .3rem; padding-bottom: .45rem; border-bottom: 1px solid var(--rule);
+       text-wrap: balance; }
+  h2 .n { font-family: var(--f-mono); font-size: .78rem; font-weight: 600;
+          color: var(--measured); margin-right: .6rem; }
+  h3 { font-family: var(--f-body); font-weight: 600; font-size: 1.02rem;
+       margin: 2rem 0 .5rem; color: var(--ink); }
+  p { margin-bottom: .9rem; }
+  p:last-child { margin-bottom: 0; }
+  strong { font-weight: 600; }
+  code { font-family: var(--f-mono); font-size: .855em; background: var(--sunken);
+         border-radius: 3px; padding: .06em .32em; white-space: nowrap; }
+
+  /* 표 */
+  .tw { overflow-x: auto; margin: 1.1rem 0 1.5rem; border: 1px solid var(--line);
+        border-radius: 4px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; font-size: .86rem; }
+  caption { caption-side: top; text-align: left; font-family: var(--f-mono); font-size: .72rem;
+            letter-spacing: .06em; color: var(--ink3); padding: .7rem .85rem .1rem;
+            text-transform: uppercase; }
+  th, td { padding: .5rem .8rem; border-bottom: 1px solid var(--line); text-align: right;
+           font-variant-numeric: tabular-nums; white-space: nowrap; }
+  th:first-child, td:first-child { text-align: left; white-space: normal; }
+  thead th { font-weight: 600; font-size: .8rem; background: var(--sunken);
+             border-bottom: 1.5px solid var(--rule); color: var(--ink2); }
+  tbody tr:last-child td { border-bottom: none; }
+  td.n, th.n { font-family: var(--f-mono); }
+  tr.hi td { background: var(--meas-bg); font-weight: 600; }
+  tr.sep td { border-top: 1.5px solid var(--rule); }
+  .m { color: var(--measured); font-weight: 600; }
+  .d { color: var(--derived); font-weight: 600; }
+  td.lbl { color: var(--ink2); }
+
+  .tag { font-family: var(--f-mono); font-size: .62rem; letter-spacing: .08em; padding: .1em .45em;
+         border-radius: 3px; text-transform: uppercase; vertical-align: .12em; }
+  .tag.meas { background: var(--meas-bg); color: var(--measured); }
+  .tag.der  { background: var(--deri-bg); color: var(--derived); }
+
+  .note { border-left: 3px solid var(--derived); background: var(--deri-bg);
+          padding: .9rem 1.05rem; margin: 1.3rem 0; font-size: .9rem; border-radius: 0 4px 4px 0; }
+  .note b { font-weight: 600; }
+  .key { border-left: 3px solid var(--measured); background: var(--meas-bg);
+         padding: .9rem 1.05rem; margin: 1.3rem 0; font-size: .93rem; border-radius: 0 4px 4px 0; }
+
+  figure { margin: 1.4rem 0 1.6rem; padding: 1rem .9rem .7rem; background: var(--surface);
+           border: 1px solid var(--line); border-radius: 4px; }
+  figure svg { display: block; width: 100%; height: auto; color: var(--ink); }
+  figcaption { font-size: .82rem; color: var(--ink2); line-height: 1.6; margin-top: .7rem;
+               padding-top: .6rem; border-top: 1px solid var(--line); }
+  figcaption b { color: var(--ink); font-weight: 600; }
+  figcaption .fig { font-family: var(--f-mono); font-size: .72rem; letter-spacing: .07em;
+                    text-transform: uppercase; color: var(--measured); display: block;
+                    margin-bottom: .3rem; }
+  /* 목차 */
+  nav.toc { background: var(--surface); border: 1px solid var(--line); border-radius: 4px;
+            padding: 1.1rem 1.3rem; margin: 2rem 0 2.6rem; }
+  nav.toc h2 { font-family: var(--f-mono); font-size: .7rem; letter-spacing: .14em;
+               text-transform: uppercase; color: var(--ink3); margin: 0 0 .8rem;
+               border: 0; padding: 0; }
+  nav.toc ol { list-style: none; margin: 0; padding: 0; counter-reset: sec;
+               columns: 2; column-gap: 2rem; }
+  nav.toc li { counter-increment: sec; margin-bottom: .34rem; font-size: .89rem;
+               break-inside: avoid; }
+  nav.toc li::before { content: counter(sec) ". "; font-family: var(--f-mono);
+                       font-size: .8em; color: var(--measured); }
+  nav.toc a { color: var(--ink); text-decoration: none; border-bottom: 1px solid transparent; }
+  nav.toc a:hover, nav.toc a:focus { border-bottom-color: var(--measured); }
+  @media (max-width: 36rem) { nav.toc ol { columns: 1; } }
+  /* 용어 */
+  dl.terms { margin: 1.2rem 0 1.6rem; display: grid;
+             grid-template-columns: max-content 1fr; gap: .45rem 1rem; font-size: .9rem; }
+  dl.terms dt { font-weight: 600; font-family: var(--f-mono); font-size: .84rem;
+                color: var(--measured); white-space: nowrap; }
+  dl.terms dd { margin: 0; color: var(--ink2); }
+  dl.terms dd b { color: var(--ink); font-weight: 600; }
+  @media (max-width: 34rem) { dl.terms { grid-template-columns: 1fr; gap: .1rem .5rem; }
+                              dl.terms dd { margin-bottom: .5rem; } }
+  ol.compact, ul.compact { margin: .9rem 0 1.1rem 1.3rem; }
+  ol.compact li, ul.compact li { margin-bottom: .45rem; }
+
+  .legend { font-family: var(--f-mono); font-size: .72rem; color: var(--ink3);
+            margin: .5rem 0 2rem; display: flex; gap: 1.2rem; flex-wrap: wrap; }
+
+  footer { margin-top: 3.5rem; padding-top: 1.2rem; border-top: 1px solid var(--rule);
+           font-family: var(--f-mono); font-size: .74rem; color: var(--ink3); line-height: 1.9; }
+
+  @media (max-width: 34rem) {
+    h1 { font-size: 1.9rem; } h2 { font-size: 1.2rem; }
+    table { font-size: .8rem; } th, td { padding: .45rem .55rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="kicker">실험 보고서 · 2026-09-01</div>
+  <h1>초당 3 메가바이트</h1>
+  <p class="sub">177B 모델의 51.2B 파라미터를 디스크에 두고 추론할 때, 디스크에서
+  실제로 끌어오는 양이 그것뿐이다. 그 비용이 어디서 오고 무엇에 의해 커지는지를 잰 기록.</p>
+  <p class="byline">
+    대상 &nbsp;Qwen3.8-Flash-Next (qwen4exp) · AtomicChat AD-3.84bpw-IQ4_XS-M64<br>
+    엔진 &nbsp;llama.cpp a32af33 (b10717) · CUDA 13.3 · sm_80<br>
+    장비 &nbsp;CMP 170HX 64 GiB HBM2e · i7-9700K · RAM 30 GiB · Crucial P1 NVMe<br>
+    측정 &nbsp;약 300 런 · 빌드 5종 · 저장계층 2종 · 경합 7수준 · 미스율 39점
+  </p>
+</header>
+
+<div class="abstract">
+  <h2>초록</h2>
+  <p>대형 MoE 모델의 파라미터 중 <strong>51.2B(29%)</strong>를 메모리에 올리지 않고 NVMe 파일에
+  남긴 채 추론하는 방식(SSD 페이징)의 비용을 측정했다. 같은 입력을 반복해
+  <strong>디스크 I/O 가 정확히 0인 조건</strong>을 만들고 콜드 조건과 대조하는 방법으로
+  페이징 비용만 분리했다.</p>
+  <p>결과: 100% 미스에서 디코드는 <strong>47.88 → 41.93 tok/s (−12.4%)</strong>. 프로세스별
+  major fault 계수로 확인한 폴트는 <strong>토큰당 16.21회</strong>로 이론값(16행)과 일치했고,
+  폴트당 정확히 <strong>4,096 B</strong>를 읽었다(readahead 없음). 폴트 실효비용은
+  <strong>183 µs</strong>로 이 장치의 4 KB 랜덤 QD1 실측치(165 µs)에 근접해,
+  게더가 <strong>직렬로 발행</strong>됨을 시사한다.</p>
+  <p>base 계열 세 빌드(본체 46.4 / 55.6 / 55.6 GB)에서는 토큰당 가중치가 18% 늘어도
+  디코드가 0.4% <em>빨라졌다</em> — 대역폭 항(+0.28 ms)과 커널 항(−0.29 ms)이 상쇄되기 때문이다.
+  반대로 프리필은 같은 빌드에서 <strong>1.37배</strong> 벌어졌다.</p>
+  <p>비용의 구조는 <strong>고정항 + 폴트수 × 폴트지연</strong> 이다. 이 곱 구조를 두 축에서
+  독립적으로 확인했다. <strong>디스크 경합</strong>(경쟁 4 KB 랜덤 읽기 57,458 op/s)은
+  폴트 지연을 <strong>5.4배</strong>로 키워 콜드 디코드를 25% 떨어뜨리지만, 폴트가 0인
+  디코드는 <strong>48.16 → 47.85 tok/s 로 무변화</strong>다. PLE 테이블 샤드만
+  2009년식 7200 rpm HDD 로 옮겼을 때도 같다 — 콜드는 <strong>41.96 → 9.59 tok/s</strong>
+  로 무너지지만 웜은 <strong>48.35 vs 48.80</strong> 으로 동일하다.
+  <strong>장치는 폴트가 발생할 때만 보인다.</strong></p>
+  <p>마지막으로 본체 크기가 0.3% 안에 일치하고 <strong>양자화 타입만 다른</strong> 두 빌드를
+  대조했다. 대역폭 항이 0.006 ms 안에 묶였는데 디코드가 <strong>15.1% 갈렸다</strong>
+  (47.72 → 54.94 tok/s). 앞선 세 빌드에서 '고정 오버헤드' 처럼 보였던 18.9 ms 는 고정이 아니라
+  <strong>양자화 타입에 따라 변하는 커널 비용</strong>이며, 통념과 달리
+  <strong>i-quant 조합이 K-quant 조합보다 빨랐다.</strong> 폴트당 비용은
+  204 vs 216 µs 로 빌드에 무관해, 커널 항과 페이징 항이 독립임이 확인됐다.</p>
+  <p>이전 판이 합성 QD1 벤치마크로 외삽한 HDD 예측(6.20 tok/s)은 <strong>18% 비관적</strong>
+  이었다 — 실측 폴트 지연은 7,280 µs 로 예측(8,780)보다 낫다. 모델의 구조는 맞았고 상수가 어긋났다.
+  또한 계측 과정에서 <strong>히트율 공식 오류</strong>, <strong>장치 카운터 오염</strong>,
+  <strong>무효한 경합 처치</strong> 세 가지 함정을 확인해 정정했다.</p>
+</div>
+
+<div class="legend">
+  <span><span class="tag meas">실측</span> 이 박스에서 잰 값</span>
+  <span><span class="tag der">유도</span> 실측값에서 계산한 값</span>
+</div>
+
+<nav class="toc"><h2>목차</h2><ol><li><a href="#s1">무엇을 재는가</a></li><li><a href="#s2">계측을 믿을 수 있게 만들기</a></li><li><a href="#s3">비용의 구조 — 폴트 회계</a></li><li><a href="#s4">폴트 지연과 미스율 — 두 축을 흔든다</a></li><li><a href="#s5">커널 항 — 빌드가 바꾸는 것</a></li><li><a href="#s6">언팩 비용 분리 — 대역폭을 묶고 타입만 바꾼다</a></li><li><a href="#s7">왜 이 텐서만 되는가</a></li><li><a href="#s8">방식 비교와 트레이드오프</a></li><li><a href="#s9">뒤집힌 것들</a></li><li><a href="#s10">한계와 남은 것</a></li></ol></nav>
+<div class="key" style="margin:1.6rem 0 2.4rem">
+  <b style="display:block;margin-bottom:.6rem">이 보고서가 답하는 질문</b>
+  <ul style="list-style:none;margin:0;padding:0;display:grid;gap:.4rem;font-size:.92rem">
+    <li>· 디스크에서 실제로 얼마나 읽는가, 왜 그만큼인가 → <a href="#s3">§3</a></li>
+    <li>· 캐시가 비면 얼마나 느려지는가 → <a href="#s3">§3.1</a></li>
+    <li>· 느린 디스크로 바꾸면? 그건 장치 종류 탓인가 속도 탓인가 → <a href="#s4">§4.1 · §4.2</a></li>
+    <li>· 다른 프로세스가 디스크를 쓰면 → <a href="#s4">§4.1</a></li>
+    <li>· 왜 폴트당 비용이 폴트 수와 <em>거꾸로</em> 움직이는가 → <a href="#s4">§4.3</a></li>
+    <li>· 장치가 1% 느려지면 몇 % 손해인가, 왜 장치마다 다른가 → <a href="#s4">§4.6</a></li>
+    <li>· 미스율이 0 에 가까울 때 수직 점프가 있어야 하지 않나 → <a href="#s4">§4.7</a></li>
+    <li>· RAM 을 늘리면 얼마나 버는가 → <a href="#s4">§4.6</a> · <a href="#s10">§10</a></li>
+    <li>· 빌드를 바꾸면 페이징 비용도 바뀌는가 → <a href="#s5">§5.3</a> · <a href="#s6">§6.3</a></li>
+    <li>· i-quant 는 언팩이 비싸서 느리지 않나 → <a href="#s6">§6</a></li>
+    <li>· dense 모델에도 쓸 수 있나 → <a href="#s7">§7.4</a></li>
+    <li>· 다른 방식(FreeToken 등)과 견주면 → <a href="#s8">§8</a></li>
+    <li>· 틀렸던 것은 무엇인가 → <a href="#s9">§9</a></li>
+  </ul>
+</div><h3 style="margin-top:2.2rem">이 보고서에서 쓰는 말</h3>
+<dl class="terms">
+  <dt>페이징</dt><dd>텐서를 메모리로 <b>복사하지 않고</b> 파일에 둔 채, 연산이 건드릴 때
+      필요한 부분만 커널이 읽어 오는 방식. 이 글에서는 llama.cpp 의
+      <code>--lazy-mode</code> 경로를 가리킨다.</dd>
+  <dt>폴트</dt><dd>정확히는 <b>major page fault</b>. 필요한 4 KB 페이지가 메모리에 없어
+      <b>디스크를 실제로 친</b> 횟수다. 캐시에 있어서 디스크를 안 친 경우는 세지 않는다.</dd>
+  <dt>미스율</dt><dd>토큰당 접근하는 16행 중 폴트가 난 비율. 0% 면 전부 캐시에 있었고,
+      100% 면 16번 다 디스크를 쳤다.</dd>
+  <dt>콜드 / 웜</dt><dd><b>콜드</b>는 그 요청이 건드리는 행이 페이지 캐시에 없는 상태,
+      <b>웜</b>은 있는 상태. 이 보고서의 웜은 대부분 <b>폴트가 정확히 0</b> 인 조건이며,
+      "디스크가 없는 것과 같은" 기준선으로 쓴다.</dd>
+  <dt>커널 항</dt><dd>토큰 하나를 만드는 데 드는 시간 중 <b>디스크와 무관한 부분</b>.
+      GPU 연산과 그 부대비용이다. 이 박스에서 18.2~21.0 ms.</dd>
+  <dt>폴트 지연</dt><dd>폴트 한 번이 실제로 잡아먹은 시간. 장치와 경합 상태로 정해진다.
+      NVMe 209 µs, 이 박스의 HDD 7,280 µs.</dd>
+  <dt>탄력성</dt><dd>장치가 1% 느려질 때 처리량이 몇 % 줄어드는가.
+      뒤에서 보듯 <b>디스크 시간이 토큰 시간에서 차지하는 비중</b>과 같다.</dd>
+</dl>
+<p style="font-size:.9rem;color:var(--ink2)">VRAM · 프리필 · 디코드 · 텐서 · 양자화처럼
+LLM 을 다뤄봤으면 아는 말은 따로 풀지 않았다.</p><!-- ═══════════════ 1 ═══════════════ -->
+<h2 id="s1"><span class="n">1</span>무엇을 재는가</h2>
+
+<p>이 보고서의 대상은 모델이 아니라 <strong>메커니즘</strong>이다. Qwen3.8-Flash-Next 는
+파라미터 176B 중 51.2B 가 가중치가 아니라 <strong>n-gram 조회 테이블</strong>(PLE)이고,
+llama.cpp 는 이 텐서를 메모리에 적재하지 않고 mmap 된 파일에 남긴 채
+필요한 행만 페이지 폴트로 가져온다.</p>
+
+<div class="tw"><table>
+<caption>표 1 — PLE 테이블의 물리 사양</caption>
+<thead><tr><th>항목</th><th class="n">값</th><th>근거</th></tr></thead>
+<tbody>
+<tr><td>텐서 모양</td><td class="n">[160, 320001536]</td><td>GGUF 헤더 <span class="tag meas">실측</span></td></tr>
+<tr><td>파라미터</td><td class="n">51,200,245,760</td><td>160 × 320,001,536</td></tr>
+<tr><td>양자화 타입</td><td class="n">Q5_1 · 6.00 bpw</td><td>GGUF 헤더 <span class="tag meas">실측</span></td></tr>
+<tr><td>파일 크기</td><td class="n">38.40 GB</td><td>샤드 2 단독 <span class="tag meas">실측</span></td></tr>
+<tr class="sep"><td>토큰당 접근 행</td><td class="n">16</td><td><code>ple_ngram_size</code> 3 · <code>heads_per_ngram</code> 8 → (3−1)×8</td></tr>
+<tr><td>행 하나의 크기</td><td class="n">120 B</td><td>160값 ÷ 32 × 24 B (Q5_1 블록)</td></tr>
+<tr><td>토큰당 <em>데이터</em></td><td class="n">1,920 B</td><td>16 × 120</td></tr>
+<tr class="hi"><td>토큰당 <em>I/O 상한</em></td><td class="n">65,536 B</td><td>16 × 4 KB 페이지 <span class="tag der">유도</span></td></tr>
+<tr><td>읽기 증폭 (100% 미스)</td><td class="n">34.1×</td><td>65,536 ÷ 1,920</td></tr>
+<tr class="sep"><td>테이블 접근 비율</td><td class="n">1 : 18,600,000</td><td>1,920 B ÷ 35.8 GiB</td></tr>
+</tbody></table></div>
+
+<div class="tw"><table>
+<caption>표 2 — 저장 계층 실측 (이 머신)</caption>
+<thead><tr><th>계층</th><th class="n">대역폭</th><th class="n">4 KB 랜덤 QD1</th><th class="n">지연</th></tr></thead>
+<tbody>
+<tr><td>VRAM (HBM2e)</td><td class="n m">1,592.8 GB/s</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>호스트 RAM (8스레드)</td><td class="n m">32.0 GB/s</td><td class="n">—</td><td class="n">—</td></tr>
+<tr><td>PCIe H2D (Gen2 ×4, pinned)</td><td class="n m">1.55 GB/s</td><td class="n">—</td><td class="n">—</td></tr>
+<tr class="hi"><td>NVMe Crucial P1</td><td class="n">1.6 GB/s 순차</td><td class="n">6,063 op/s</td><td class="n">165 µs</td></tr>
+<tr><td>HDD Samsung HD502HJ (7200 rpm)</td><td class="n">—</td><td class="n m">113 op/s</td><td class="n m">8,780 µs</td></tr>
+</tbody></table></div>
+
+<p>HDD 값은 이 박스에 달린 두 회전 디스크 중 <strong>느린 쪽</strong>(500 GB · SATA II · 2009년)에서
+<code>O_DIRECT</code> 4 KB 랜덤 읽기 300회 × 2세트로 직접 측정했다. NVMe 대비 <strong>53배</strong> 느리다.</p>
+
+<!-- ═══════════════ 2 ═══════════════ -->
+<h2 id="s2"><span class="n">2</span>계측을 믿을 수 있게 만들기</h2>
+
+<p>페이징 비용만 분리하려면 <strong>디스크를 안 건드리는 동일 작업</strong>이 있어야 한다.
+<code>temperature=0, top_k=1, seed=42</code> 로 같은 프롬프트를 반복하면 출력 토큰열이
+바이트 단위로 같으므로 <strong>정확히 같은 n-gram 행</strong>만 건드린다. 1회차는 콜드,
+2회차부터는 그 행들이 페이지 캐시에 있다. 차이가 곧 페이징 비용이다.</p>
+
+<h3>함정 1 — 장치 단위 카운터는 오염된다</h3>
+<p><code>/sys/block/nvme0n1/stat</code> 은 <strong>장치 전체</strong>를 센다. 1차 측정에서 요청당
+3~5 GB 라는 불가능한 값이 나왔는데, 원인은 같은 NVMe 에서 다른 모델을 받고 sha256 을
+검증하던 다운로더였다(누적 84 GB 읽기). <strong>프로세스별 <code>/proc/&lt;pid&gt;/io</code> 의
+<code>read_bytes</code></strong> 로 바꾸자 값이 안정됐다.</p>
+
+<h3>함정 2 — 히트율 공식이 틀려 있었다</h3>
+<p>기존 계획서는 <code>히트율 = 1 − 읽은바이트 ÷ (N × 2764)</code> 였다. 이는
+<strong>I/O 바이트를 데이터 바이트로 나눈다.</strong> 게더는 4 KB 페이지 단위로 일어나므로
+100% 미스일 때의 I/O 는 2,764 B 가 아니라 65,536 B 다. 옛 공식은 히트율을 음수로 만든다.</p>
+
+<div class="key">
+  <b>정정된 공식</b> — <code>히트율 = 1 − (major fault 수) ÷ (토큰수 × 16)</code>.
+  분자를 바이트가 아니라 <b>폴트 수</b>로 세는 것이 핵심이다.
+  <code>/proc/&lt;pid&gt;/stat</code> 의 <code>maj_flt</code> 로 직접 얻는다.
+</div>
+
+<!-- ═══════════════ 3 ═══════════════ -->
+<h2 id="s3"><span class="n">3</span>비용의 구조 — 폴트 회계</h2>
+
+<h3>3.1 페이징 비용의 분리</h3>
+
+<div class="tw"><table>
+<caption>표 3 — 동일 입력 반복 (F1, 256 토큰 × 4런)</caption>
+<thead><tr><th>조건</th><th class="n">tok/s</th><th class="n">ms/토큰</th><th class="n">major fault/토큰</th><th class="n">읽기 B/토큰</th><th class="n">B/fault</th></tr></thead>
+<tbody>
+<tr><td>콜드 (1회차)</td><td class="n">41.93</td><td class="n">23.85</td><td class="n">16.21</td><td class="n">71,216</td><td class="n">4,393</td></tr>
+<tr class="hi"><td>웜 (2~4회차)</td><td class="n">47.88</td><td class="n">20.89</td><td class="n">0.00</td><td class="n">0</td><td class="n">—</td></tr>
+<tr class="sep"><td class="lbl">차이</td><td class="n d">−12.4%</td><td class="n d">+2.97</td><td class="n">+16.21</td><td class="n">—</td><td class="n">—</td></tr>
+</tbody></table></div>
+
+<p>세 가지가 한꺼번에 확정된다.</p>
+
+<ol class="compact">
+  <li><strong>웜 조건에서 디스크 I/O 가 문자 그대로 0이다.</strong> 읽기 0 바이트, major fault 0회.
+  이것이 "테이블이 RAM 에 있을 때"의 상한선이다 — <strong>47.88 tok/s</strong>.</li>
+  <li><strong>콜드에서 토큰당 16.21 폴트</strong>는 이론값 16행과 일치한다. 16개 행이
+  <strong>서로 다른 페이지</strong>에 흩어져 있다는 뜻이고, 표 1 의 I/O 상한 모델이 맞다는 확인이다.
+  (초과분 0.21 은 프롬프트 20토큰의 프리필 몫이다.)</li>
+  <li><strong>폴트당 4,393 B ≈ 4,096 B.</strong> 커널이 폴트 하나에 페이지 하나만 읽는다 —
+  <strong>fault-around 나 readahead 가 걸리지 않았다.</strong> 랜덤 게더에 정확히 맞는 동작이다.</li>
+</ol>
+
+<div class="key">
+  <b>폴트 실효비용 = 2.97 ms ÷ 16.21 = 183 µs.</b>
+  이 장치의 4 KB 랜덤 QD1 실측 지연은 165 µs 다. 둘이 근접한다는 것은
+  <b>16개 폴트가 겹치지 않고 직렬로 발행된다</b>는 뜻이다 — 큐 깊이 1.
+  게더를 병렬로 던질 수 있다면 여기에 개선 여지가 남아 있다.
+</div>
+
+<h3>3.2 미스율에 따른 처리량</h3>
+
+<p>서로 겹치지 않는 신규 텍스트 18종으로 미스율을 흩뜨렸다. 프리필에서도 토큰당 16행
+게더가 일어나므로 미스율은 <strong>(프리필 + 디코드) 토큰</strong> 기준이다.</p>
+
+<div class="tw"><table>
+<caption>표 4 — 신규 텍스트 18런 (F2·F3)</caption>
+<thead><tr><th>구간</th><th class="n">런</th><th class="n">미스율</th><th class="n">폴트/토큰</th><th class="n">디코드 tok/s</th></tr></thead>
+<tbody>
+<tr><td>미스 &lt; 20%</td><td class="n">3</td><td class="n">14.1%</td><td class="n">2.26</td><td class="n">46.46</td></tr>
+<tr><td>미스 20 ~ 40%</td><td class="n">4</td><td class="n">32.9%</td><td class="n">5.26</td><td class="n">43.92</td></tr>
+<tr><td>미스 ≥ 40%</td><td class="n">11</td><td class="n">47.0%</td><td class="n">7.51</td><td class="n">44.19</td></tr>
+<tr class="sep"><td class="lbl">전체 범위</td><td class="n">18</td><td class="n">12.1 – 52.0%</td><td class="n">1.94 – 8.32</td><td class="n">39.67 – 47.22</td></tr>
+</tbody></table></div>
+
+<p><strong>구간 평균이 단조롭지 않다</strong>(46.46 → 43.92 → 44.19). 회귀도
+<code>토큰시간(ms) = 21.18 + 0.048 × 폴트/토큰</code>, <strong>R² = 0.21</strong> 이다.</p>
+
+<div class="note">
+  <b>이 설계에는 노이즈보다 큰 결함이 있다 — 부분적 오설정이다.</b>
+  폴트의 대부분은 <b>프리필</b>에서 발생하는데(프롬프트 ~600토큰 × 16행),
+  <code>predicted_per_second</code> 는 <b>디코드</b> 시간만 잰다. x축과 y축을
+  서로 다른 토큰 집단에서 측정하고 있었다. §3.4 이후의 실험은 프로토콜을 바꿨다 —
+  <b>짧은 고정 프롬프트</b>(프리필 폴트를 전체의 7%로 억제) + <b>매 런 다른 seed</b>
+  (생성 토큰열이 매번 새것이라 디코드 미스가 유지된다) + <code>ignore_eos</code>(길이 고정).
+</div>
+
+<p>따라서 이 절의 회귀는 <strong>참고용</strong>이고, 폴트 비용의 신뢰할 만한 값은
+통제된 §3.1(183 µs)과 §3.4·§4 의 짝지은 측정에서 나온다.
+<strong>통제된 F1 실험(183 µs)이 더 신뢰할 만한 값이고</strong>, 회귀의 절편
+21.18 ms(= 47.2 tok/s)가 F1 의 웜 값 20.89 ms(47.88 tok/s)와 일치한다는 점이
+두 실험이 같은 것을 재고 있다는 교차 확인이다.</p>
+
+<h3>3.3 컨텍스트 길이 · 프리필 · 동시성</h3>
+
+<div class="tw"><table>
+<caption>표 5 — 컨텍스트 길이별 디코드 속도 (E3, 캐시 웜)</caption>
+<thead><tr><th>프리필 토큰</th><th class="n">디코드 tok/s</th><th class="n">기준 대비</th></tr></thead>
+<tbody>
+<tr><td class="n">134</td><td class="n">40.62</td><td class="n">100.0%</td></tr>
+<tr><td class="n">1,198</td><td class="n">40.07</td><td class="n">98.6%</td></tr>
+<tr><td class="n">4,479</td><td class="n">39.82</td><td class="n">98.0%</td></tr>
+<tr><td class="n">14,157</td><td class="n">40.60</td><td class="n">100.0%</td></tr>
+<tr><td class="n">29,598</td><td class="n">36.18</td><td class="n">89.1%</td></tr>
+</tbody></table></div>
+
+<p><strong>14k 토큰까지 디코드가 사실상 평평하다.</strong> 이 아키텍처는 48레이어 중 어텐션이
+1/4뿐이고 그마저 sparse(QSA)이며 나머지는 상태만 갖는 GDN 이라 KV 가 싸다. 그리고
+<strong>PLE 게더는 컨텍스트 길이와 무관하게 토큰당 16행으로 고정</strong>이다 —
+SSD 페이징 비용은 컨텍스트를 늘려도 늘지 않는다.</p>
+
+<div class="tw"><table>
+<caption>표 6 — 프리필 스케일링, 콜드 vs 웜 (E4)</caption>
+<thead><tr><th>프리필 토큰</th><th class="n">콜드 tok/s</th><th class="n">웜 tok/s</th><th class="n">콜드 손해</th><th class="n">콜드 읽기</th></tr></thead>
+<tbody>
+<tr><td class="n">655</td><td class="n">226.7</td><td class="n">327.8</td><td class="n d">30.8%</td><td class="n">21.1 MB</td></tr>
+<tr><td class="n">1,696</td><td class="n">318.9</td><td class="n">390.4</td><td class="n d">18.3%</td><td class="n">29.0 MB</td></tr>
+<tr><td class="n">3,878</td><td class="n">261.6</td><td class="n">324.4</td><td class="n d">19.4%</td><td class="n">108.8 MB</td></tr>
+<tr><td class="n">9,350</td><td class="n">324.3</td><td class="n">340.2</td><td class="n d">4.7%</td><td class="n">86.5 MB</td></tr>
+<tr class="hi"><td class="n">20,480</td><td class="n">321.4</td><td class="n">325.0</td><td class="n">1.1%</td><td class="n">289.3 MB</td></tr>
+</tbody></table></div>
+
+<p><strong>프리필이 길수록 콜드 페널티가 사라진다.</strong> 655토큰에서 30.8% 이던 손해가
+20,480토큰에서 1.1% 로 줄어든다. 배치가 커지면 게더가 계산과 겹칠 여지가 커지고
+고정 오버헤드가 희석되기 때문이다. <strong>SSD 페이징은 긴 프롬프트에서 유리하다.</strong></p>
+
+<div class="tw"><table>
+<caption>표 7 — 동시 요청 (E5, 슬롯 4개)</caption>
+<thead><tr><th>동시</th><th class="n">스트림당 tok/s</th><th class="n">합계 tok/s</th><th class="n">스케일</th></tr></thead>
+<tbody>
+<tr><td class="n">1</td><td class="n">44.81</td><td class="n">44.81</td><td class="n">1.00×</td></tr>
+<tr><td class="n">2</td><td class="n">35.61</td><td class="n">71.21</td><td class="n">1.59×</td></tr>
+<tr><td class="n">4</td><td class="n">22.09</td><td class="n">88.38</td><td class="n">1.97×</td></tr>
+</tbody></table></div>
+
+<h3>3.4 디스크 경합 — 1차 실험은 무효였다</h3>
+
+<div class="note">
+  <b>철회.</b> 1차 실험의 '경합' 조건은 <b>모델 다운로드</b>였다. 그것은 인터넷 속도에 묶인
+  62 MB/s 짜리 <b>쓰기</b>로, 이 NVMe 의 순차 1.6 GB/s · 랜덤 6,063 op/s 능력에 비하면
+  사실상 무처치다. PLE 폴트가 다투는 자원은 <b>4 KB 랜덤 읽기 IOPS</b> 인데 그것을 건드리지
+  않았다. 당시 결론이던 "SSD 페이징은 경합에 견고하다" 는 <b>근거 없는 주장</b>이었다.
+</div>
+
+<p>진짜 부하로 다시 쟀다. <code>O_DIRECT</code> 4 KB 랜덤 읽기를 N 스레드로 걸어
+장치를 포화시키고, 같은 서버에 같은 프로토콜로 요청을 보냈다.
+<strong>통제군은 웜(폴트 0) 조건</strong>이다 — 디스크를 아예 안 건드리므로
+경합이 영향을 주면 모델이 틀린 것이다.</p>
+
+<div class="tw"><table>
+<caption>표 8 — 경쟁 읽기 부하에 따른 디코드</caption>
+<thead><tr><th>부하 스레드</th><th class="n">실측 경쟁 IOPS</th><th class="n">웜 (폴트 0)</th><th class="n">콜드</th><th class="n">폴트/토큰</th><th class="n">폴트 실효비용</th></tr></thead>
+<tbody>
+<tr><td>0</td><td class="n">0</td><td class="n">48.16</td><td class="n">43.56</td><td class="n">9.95</td><td class="n">220 µs</td></tr>
+<tr><td>4</td><td class="n">20,296</td><td class="n">48.15</td><td class="n">42.92</td><td class="n">9.41</td><td class="n">269 µs</td></tr>
+<tr><td>16</td><td class="n">41,374</td><td class="n">47.85</td><td class="n">38.33</td><td class="n">12.00</td><td class="n">433 µs</td></tr>
+<tr class="hi"><td>64</td><td class="n">57,458</td><td class="n">47.85</td><td class="n">32.62</td><td class="n">8.22</td><td class="n">1,186 µs</td></tr>
+<tr class="sep"><td class="lbl">변화</td><td class="n">—</td><td class="n m">−0.6%</td><td class="n d">−25.1%</td><td class="n">—</td><td class="n d">5.4배</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  <b>통제군이 완벽히 평평하다.</b> 초당 57,458회의 경쟁 읽기가 device 를 포화시키는 동안에도
+  폴트가 0인 디코드는 48.16 → 47.85 tok/s 로 <b>변하지 않는다</b>. 부하 발생기가 8코어에서
+  64스레드를 돌렸는데도 그렇다는 것은 CPU 경합 교란도 없었다는 뜻이다.
+  <br><br>
+  즉 경합은 <b>폴트 경로에만</b> 작용하며, 그 작용은 <b>폴트당 지연을 5.4배로 키우는 것</b>이다.
+  폴트 수(미스율)에는 손대지 않는다.
+</div>
+
+<!-- ═══════════════ 4 ═══════════════ -->
+<h2 id="s4"><span class="n">4</span>폴트 지연과 미스율 — 두 축을 흔든다</h2>
+
+<p>PLE 테이블이 든 <strong>샤드 2 하나만</strong>(38.4 GB, 그 안에 텐서 1개)
+2009년식 7200 rpm HDD 로 복사하고, 나머지 27개 샤드는 NVMe 에 둔 채 심볼릭 링크로
+디렉터리를 구성했다. 가중치 적재 경로는 그대로 NVMe 이므로 <strong>페이징 경로만
+장치가 바뀐다</strong>. 같은 빌드, 같은 프로토콜, 같은 seed 를 썼다.</p>
+
+<div class="tw"><table>
+<caption>표 9 — 짝지은 A/B. 짝지음은 <b>가로 방향</b>이다: 각 행의 NVMe·HDD 가 같은 seed 를 써 같은 토큰열·같은 폴트 패턴을 갖는다. 행끼리는 seed 가 달라 미스율이 서로 다르다</caption>
+<thead><tr><th>런</th><th class="n">폴트/토큰</th><th class="n">NVMe tok/s</th><th class="n">HDD tok/s</th><th class="n">배수</th><th class="n">NVMe µs/폴트</th><th class="n">HDD µs/폴트</th></tr></thead>
+<tbody>
+<tr class="hi"><td>웜 (폴트 0)</td><td class="n">0.0</td><td class="n">48.35</td><td class="n">48.80</td><td class="n">1.00×</td><td class="n">—</td><td class="n">—</td></tr>
+<tr class="sep"><td>run A</td><td class="n">13.47</td><td class="n">41.72</td><td class="n">8.44</td><td class="n">4.94×</td><td class="n">244</td><td class="n">7,278</td></tr>
+<tr><td>run B</td><td class="n">13.68</td><td class="n">41.77</td><td class="n">8.42</td><td class="n">4.96×</td><td class="n">238</td><td class="n">7,190</td></tr>
+<tr><td>run C</td><td class="n">12.60</td><td class="n">41.81</td><td class="n">8.96</td><td class="n">4.66×</td><td class="n">257</td><td class="n">7,234</td></tr>
+<tr><td>run D</td><td class="n">10.68</td><td class="n">40.43</td><td class="n">10.20</td><td class="n">3.96×</td><td class="n">379</td><td class="n">7,281</td></tr>
+<tr><td>run E</td><td class="n">9.30</td><td class="n">42.85</td><td class="n">11.19</td><td class="n">3.83×</td><td class="n">286</td><td class="n">7,416</td></tr>
+<tr><td>run F</td><td class="n">8.63</td><td class="n">42.55</td><td class="n">11.55</td><td class="n">3.69×</td><td class="n">327</td><td class="n">7,483</td></tr>
+<tr class="sep"><td class="lbl">중앙값</td><td class="n">—</td><td class="n">41.96</td><td class="n">9.59</td><td class="n d">4.4×</td><td class="n">271</td><td class="n">7,280</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  <b>테이블이 2009년 하드디스크에 있어도, 폴트가 없으면 값이 같다</b> — 48.35 vs 48.80 tok/s.
+  장치는 <b>폴트가 발생할 때만</b> 보인다. 이것이 §3.4 의 경합 통제군과 같은 결론이며,
+  <code>토큰시간 = 고정 + 폴트수 × 폴트지연</code> 의 <b>곱 구조를 두 축에서 독립적으로</b> 확인한다.
+</div>
+
+<div class="tw"><table>
+<caption>표 10 — 4축 종합. 고정항 20.6 ms 는 셋 다 동일</caption>
+<thead><tr><th>축</th><th class="n">폴트 지연</th><th class="n">웜 (폴트 0)</th><th class="n">실측 콜드</th><th class="n">모델(16폴트)</th></tr></thead>
+<tbody>
+<tr><td>NVMe</td><td class="n">297 µs</td><td class="n">48.35</td><td class="n">41.96</td><td class="n">39.4</td></tr>
+<tr><td>NVMe + 경합 57k op/s</td><td class="n">1,186 µs</td><td class="n">47.85</td><td class="n">32.62</td><td class="n">25.3</td></tr>
+<tr class="hi"><td>HDD (테이블만)</td><td class="n">6,995 µs</td><td class="n">48.80</td><td class="n">9.59</td><td class="n">7.6</td></tr>
+</tbody></table></div>
+
+<h3>4.1 앞선 외삽은 18% 비관적이었다</h3>
+
+<p>이 보고서의 이전 판은 <code>O_DIRECT</code> QD1 벤치마크(8,780 µs)로 HDD 를 외삽해
+100% 미스에서 <strong>6.20 tok/s</strong> 를 예측했다. 실측된 폴트 지연은
+<strong>6,995~7,280 µs</strong> 로 <strong>20% 더 빠르고</strong>, 같은 모델에 넣으면
+16폴트에서 <strong>7.6 tok/s</strong> 다.</p>
+
+<p>즉 <strong>모델의 구조는 맞았고 상수가 어긋났다.</strong> 합성 QD1 벤치마크가
+실제 페이징보다 비관적인 이유는 게더의 16개 행 요청이 완전히 직렬은 아니어서
+디스크 큐가 약간의 겹침을 얻기 때문으로 보인다 — 장치별 비율도
+합성 벤치의 53배가 아니라 <strong>실측 26.8배</strong>다.</p>
+
+<div class="note">
+  <b>그래도 결론은 바뀌지 않는다.</b> 회전 디스크에서 <b>9.59 tok/s</b> — 느리지만 동작한다.
+  대조군: 같은 HDD 로 <b>전문가 가중치</b>를 스트리밍하면 토큰당 2.2 GB ÷ ~110 MB/s =
+  <b>20초/토큰(0.05 tok/s)</b> 이다. 같은 장치에서 <b>190배</b> 차이가 난다.
+</div>
+
+<h3>4.2 장치 종류가 따로 작용하는가 — 아니다</h3>
+
+<p>앞 절은 NVMe 와 HDD 를 비교했다. 그런데 두 장치는 <strong>지연 말고도</strong> 여러 가지가 다르다
+(탐색 유무, 큐 구조, 전송 속도). 지연이 <em>충분통계</em>인지 — 즉 지연만 같으면 장치 종류는
+무관한지 — 를 가리려면 <strong>같은 장치를 느리게 만들어</strong> 비교해야 한다.</p>
+
+<p>같은 NVMe 에 경쟁 4 KB 랜덤 읽기 부하를 걸어 폴트 지연만 올렸다. 하드디스크가 느린 원인
+(헤드 이동)과는 전혀 다른 원인이다.</p>
+
+<div class="tw"><table>
+<caption>표 11 — 같은 빌드(IQ4_XS)에서 폴트 지연만 바꾼다</caption>
+<thead><tr><th>조건</th><th class="n">폴트 지연</th><th class="n">웜 (폴트 0)</th><th class="n">콜드</th><th class="n">폴트/토큰</th></tr></thead>
+<tbody>
+<tr><td>NVMe · 부하 없음</td><td class="n">259 µs</td><td class="n">48.50</td><td class="n">42.11</td><td class="n">12.10</td></tr>
+<tr><td>NVMe · 경합 64 스레드</td><td class="n">1,183 µs</td><td class="n">48.52</td><td class="n">32.16</td><td class="n">8.86</td></tr>
+<tr><td>NVMe · 경합 256 스레드</td><td class="n">4,462 µs</td><td class="n">48.40</td><td class="n">13.56</td><td class="n">11.90</td></tr>
+<tr class="hi"><td>NVMe · 경합 512 스레드</td><td class="n">6,824 µs</td><td class="n">48.26</td><td class="n">10.03</td><td class="n">11.57</td></tr>
+<tr class="hi"><td>HDD · 실제 장치</td><td class="n">7,237 µs</td><td class="n">48.80</td><td class="n">9.32</td><td class="n">11.99</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  <b>느리게 만든 NVMe 와 진짜 HDD 가 같은 곡선 위에 있다.</b>
+  폴트 지연이 6,824 vs 7,237 µs 로 <b>1.06배</b> 차이일 때 콜드 처리량은 10.03 vs 9.32 tok/s 로
+  <b>1.08배</b> 차이다. 즉 <b>폴트 지연이 장치의 충분통계</b>이고, 장치 종류는 그 숫자를
+  통해서만 작용한다. 회전 디스크라는 사실 자체가 따로 벌점을 매기지 않는다.
+  <br><br>
+  그리고 웜 통제군이 <b>512 스레드에서도 48.26 tok/s</b> 로 평평하다.
+  8 코어에서 512 스레드를 돌렸는데도 폴트 0 인 디코드가 안 흔들린다는 것은
+  <b>CPU 경합 교란이 없다</b>는 뜻이다 — 이 실험이 잰 것은 오직 디스크 경로다.
+</div>
+
+<p>실용적으로는 이렇게 읽는다. <strong>"NVMe 냐 HDD 냐" 가 아니라 "읽기 한 번에 몇 µs 냐" 만
+보면 된다.</strong> 붐비는 NVMe 는 한가한 HDD 보다 나쁠 수 있고, 그 경계는 다음 절의
+탄력성 계산으로 정해진다.</p>
+
+<h3>4.3 '폴트당 비용' 은 상수가 아니다</h3>
+
+<p>표 9 의 행들은 seed 가 달라 미스율이 52%~100% 로 흩어져 있다. 그런데
+<strong>µs/폴트가 폴트 수와 반대로 움직인다</strong> — 폴트가 적을수록 비싸진다.</p>
+
+<div class="tw"><table>
+<caption>표 12 — HDD. 총 디스크시간과 폴트당 비용은 방향이 다르다</caption>
+<thead><tr><th class="n">폴트/토큰</th><th class="n">미스율</th><th class="n">총 디스크시간</th><th class="n">µs/폴트</th></tr></thead>
+<tbody>
+<tr class="hi"><td class="n">0.00</td><td class="n">0%</td><td class="n">0.00 ms</td><td class="n">— &nbsp;<span class="m">측정</span></td></tr>
+<tr><td class="n">8.84</td><td class="n">52%</td><td class="n">66.12 ms</td><td class="n">7,483</td></tr>
+<tr><td class="n">10.65</td><td class="n">63%</td><td class="n">77.53 ms</td><td class="n">7,281</td></tr>
+<tr><td class="n">13.66</td><td class="n">81%</td><td class="n">98.21 ms</td><td class="n">7,190</td></tr>
+<tr><td class="n">16.89</td><td class="n">100%</td><td class="n">118.67 ms</td><td class="n">7,024</td></tr>
+</tbody></table></div>
+
+<p>적합구간(8.8~16.9)만 보면 <code>디스크시간 = 7.70 ms + 폴트수 × 6,613 µs</code> 가
+R² = 0.999 로 들어맞는다. 그러나 <strong>폴트 0 에서 디스크시간이 0 이라는 것은
+웜 통제군으로 측정된 사실</strong>이므로 절편 7.70 ms 는 존재할 수 없다.
+관계는 <strong>비선형</strong>이다 — 폴트 밀도가 높을수록 폴트당이 <strong>6.1% 싸진다</strong>.</p>
+
+<div class="note">
+  <b>가장 유력한 후보를 먼저 배제했다.</b> 웜 기준선은 <code>temp 0 / top_k 1</code>,
+  콜드 런은 <code>temp 0.85 / top_k 40</code> 이라 샘플링 비용 차이가 절편을 만들 수 있었다.
+  같은 seed 를 두 번 돌려 폴트 0 상태에서 두 설정을 직접 비교한 결과
+  <b>0.003 ms/토큰</b> — 기각이다.
+  <br><br>
+  남는 설명은 <b>디스크 쪽 지역성</b>이다. 한 토큰의 16개 행 요청은 시간적으로 붙어서 발행되므로,
+  미스가 많을수록 그 그룹 안에서 탐색 순서 최적화와 큐 채움의 여지가 커진다.
+  <b>따라서 강건한 양은 총 디스크시간이고, µs/폴트는 파생 비율일 뿐이다</b> —
+  이 보고서의 µs/폴트 값은 관측 구간의 평균으로 읽어야 한다.
+</div>
+
+<h3>4.4 미스율 축을 직접 훑는다</h3>
+
+<p>미스율을 통제 변수로 쓰기 위해 매번 새 seed 로 생성했다(그림 1). 처음에는 미스 ~80% 이고,
+흔한 n-gram 이 페이지 캐시에 쌓이면서 내려간다. 본체가 <strong>바이트 단위로 같은</strong>
+두 빌드(AtomicChat 4.27bpw · 5.00bpw)에서 각 18런, 총 36점을 얻었다.</p>
+
+<figure>
+<svg viewBox="0 0 740 300" role="img" aria-label="그림 1. 미스율에 대한 토큰 시간. 좌 NVMe 는 20.6에서 24.0 ms 로, 우 HDD 는 20.5에서 137 ms 로 오른다. 두 축 모두 선형이며 실측점이 모델 직선 위에 놓인다.">
+<text x="50" y="18" font-size="12.5" font-weight="600" fill="var(--s1)">NVMe</text>
+<text x="336.0" y="18" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".6">기울기 3.34 ms / 100%p</text>
+<line x1="50.0" y1="254.0" x2="336.0" y2="254.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="43.0" y="258.0" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">0</text>
+<line x1="50.0" y1="167.8" x2="336.0" y2="167.8" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="43.0" y="171.8" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">10</text>
+<line x1="50.0" y1="81.7" x2="336.0" y2="81.7" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="43.0" y="85.7" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">20</text>
+<line x1="50.0" y1="30.0" x2="336.0" y2="30.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="43.0" y="34.0" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">26</text>
+<text x="50.0" y="271" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".55">0%</text>
+<text x="193.0" y="271" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".55">50%</text>
+<text x="336.0" y="271" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".55">100%</text>
+<line x1="50.0" y1="254.0" x2="336.0" y2="254.0" stroke="currentColor" stroke-width="1.2" opacity=".3"/>
+<path d="M50.0,76.3 L336.0,47.5" fill="none" stroke="var(--s1)" stroke-width="2"/>
+<circle cx="201.6" cy="60.2" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 53% · 22.5 ms/토큰</title></circle>
+<circle cx="257.5" cy="53.6" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 73% · 23.3 ms/토큰</title></circle>
+<circle cx="234.4" cy="57.4" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 64% · 22.8 ms/토큰</title></circle>
+<circle cx="251.5" cy="54.1" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 70% · 23.2 ms/토큰</title></circle>
+<circle cx="215.5" cy="59.0" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 58% · 22.6 ms/토큰</title></circle>
+<circle cx="238.6" cy="56.4" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 66% · 22.9 ms/토큰</title></circle>
+<circle cx="204.0" cy="59.9" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 54% · 22.5 ms/토큰</title></circle>
+<circle cx="219.5" cy="58.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 59% · 22.7 ms/토큰</title></circle>
+<circle cx="188.2" cy="61.9" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 48% · 22.3 ms/토큰</title></circle>
+<circle cx="215.2" cy="59.9" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 58% · 22.5 ms/토큰</title></circle>
+<circle cx="215.5" cy="58.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 58% · 22.7 ms/토큰</title></circle>
+<circle cx="160.6" cy="64.9" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 39% · 21.9 ms/토큰</title></circle>
+<circle cx="198.2" cy="60.1" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 52% · 22.5 ms/토큰</title></circle>
+<circle cx="201.4" cy="61.4" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 53% · 22.4 ms/토큰</title></circle>
+<circle cx="181.9" cy="62.2" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 46% · 22.3 ms/토큰</title></circle>
+<circle cx="180.1" cy="61.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 45% · 22.3 ms/토큰</title></circle>
+<circle cx="185.6" cy="60.4" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 47% · 22.5 ms/토큰</title></circle>
+<circle cx="182.2" cy="60.9" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 46% · 22.4 ms/토큰</title></circle>
+<circle cx="252.8" cy="54.3" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 71% · 23.2 ms/토큰</title></circle>
+<circle cx="280.2" cy="52.4" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 80% · 23.4 ms/토큰</title></circle>
+<circle cx="237.4" cy="57.7" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 66% · 22.8 ms/토큰</title></circle>
+<circle cx="194.6" cy="61.5" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 51% · 22.3 ms/토큰</title></circle>
+<circle cx="284.2" cy="51.2" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 82% · 23.5 ms/토큰</title></circle>
+<circle cx="212.4" cy="59.4" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 57% · 22.6 ms/토큰</title></circle>
+<circle cx="247.7" cy="53.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 69% · 23.2 ms/토큰</title></circle>
+<circle cx="214.9" cy="59.0" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 58% · 22.6 ms/토큰</title></circle>
+<circle cx="188.6" cy="62.0" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 48% · 22.3 ms/토큰</title></circle>
+<circle cx="214.8" cy="58.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 58% · 22.7 ms/토큰</title></circle>
+<circle cx="250.4" cy="54.5" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 70% · 23.2 ms/토큰</title></circle>
+<circle cx="201.6" cy="60.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 53% · 22.4 ms/토큰</title></circle>
+<circle cx="224.8" cy="57.6" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 61% · 22.8 ms/토큰</title></circle>
+<circle cx="177.5" cy="62.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 45% · 22.2 ms/토큰</title></circle>
+<circle cx="149.6" cy="66.3" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 35% · 21.8 ms/토큰</title></circle>
+<circle cx="191.1" cy="60.8" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 49% · 22.4 ms/토큰</title></circle>
+<circle cx="205.2" cy="58.2" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 54% · 22.7 ms/토큰</title></circle>
+<circle cx="149.7" cy="65.2" r="3.2" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.5"><title>NVMe · 미스 35% · 21.9 ms/토큰</title></circle>
+<circle cx="50.0" cy="77.1" r="4.6" fill="var(--surface)" stroke="var(--s1)" stroke-width="2.4"><title>NVMe 웜 통제군 · 미스 0% · 20.54 ms</title></circle>
+<text x="55.7" y="66.1" font-size="10" fill="currentColor" opacity=".7">웜 20.5</text>
+<text x="336.0" y="38.5" text-anchor="end" font-size="11" font-weight="600" fill="var(--s1)">24 ms</text>
+<text x="440.0" y="18" font-size="12.5" font-weight="600" fill="var(--s2)">HDD</text>
+<text x="726.0" y="18" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".6">기울기 116.48 ms / 100%p</text>
+<line x1="440.0" y1="254.0" x2="726.0" y2="254.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="433.0" y="258.0" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">0</text>
+<line x1="440.0" y1="176.8" x2="726.0" y2="176.8" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="433.0" y="180.8" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">50</text>
+<line x1="440.0" y1="99.5" x2="726.0" y2="99.5" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="433.0" y="103.5" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">100</text>
+<line x1="440.0" y1="30.0" x2="726.0" y2="30.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="433.0" y="34.0" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">145</text>
+<text x="440.0" y="271" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".55">0%</text>
+<text x="583.0" y="271" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".55">50%</text>
+<text x="726.0" y="271" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".55">100%</text>
+<line x1="440.0" y1="254.0" x2="726.0" y2="254.0" stroke="currentColor" stroke-width="1.2" opacity=".3"/>
+<path d="M440.0,222.3 L726.0,42.4" fill="none" stroke="var(--s2)" stroke-width="2"/>
+<circle cx="667.2" cy="71.0" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 79% · 118.4 ms/토큰</title></circle>
+<circle cx="670.6" cy="70.6" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 81% · 118.7 ms/토큰</title></circle>
+<circle cx="652.6" cy="81.7" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 74% · 111.6 ms/토큰</title></circle>
+<circle cx="619.8" cy="102.6" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 63% · 98.0 ms/토큰</title></circle>
+<circle cx="596.8" cy="115.9" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 55% · 89.4 ms/토큰</title></circle>
+<circle cx="589.2" cy="120.2" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 52% · 86.6 ms/토큰</title></circle>
+<circle cx="725.2" cy="39.0" r="3.2" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.5"><title>HDD · 미스 100% · 139.2 ms/토큰</title></circle>
+<circle cx="440.0" cy="222.3" r="4.6" fill="var(--surface)" stroke="var(--s2)" stroke-width="2.4"><title>HDD 웜 통제군 · 미스 0% · 20.49 ms</title></circle>
+<text x="445.7" y="211.3" font-size="10" fill="currentColor" opacity=".7">웜 20.5</text>
+<text x="726.0" y="33.4" text-anchor="end" font-size="11" font-weight="600" fill="var(--s2)">137 ms</text>
+<text x="370" y="294" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".65">페이지 캐시 미스율 &nbsp;·&nbsp; 세로축 ms/토큰 (두 패널의 눈금이 다르다)</text>
+</svg>
+<figcaption><span class="fig">그림 1</span>
+<b>선은 모델, 점은 실측. 두 패널 모두 세로축이 선형이다.</b>
+왼쪽 NVMe 36점, 오른쪽 HDD 7점, 각 패널의 속 빈 원은 웜 통제군(미스 0%).
+<b>두 관계 모두 미스율에 대해 직선</b>이고 다른 것은 기울기뿐이다 — NVMe 3.3 ms,
+HDD 116.5 ms per 100%p, <b>35배</b>. 세로 눈금이 서로 다르므로 두 패널의 높이를 직접 비교하지 말 것.
+NVMe 회귀 R² = 0.959, 절편 20.628 ms 가 웜 실측 20.52~20.55 ms 와 일치한다.
+HDD 는 폴트당 비용이 밀도에 따라 6% 변해(§4.4) 직선이 아주 살짝 오목하다.</figcaption>
+</figure>
+
+<div class="tw"><table>
+<caption>표 13 — PLE 크기 대조군. 본체가 동일하고 테이블만 다르다</caption>
+<thead><tr><th>빌드</th><th>PLE</th><th class="n">행 크기</th><th class="n">웜 ms</th><th class="n">회귀 절편</th><th class="n">µs/폴트</th><th class="n">R²</th></tr></thead>
+<tbody>
+<tr><td>AtomicChat 4.27bpw</td><td>Q5_1 · 38.4 GB</td><td class="n">120 B</td><td class="n">20.552</td><td class="n">20.598</td><td class="n">211</td><td class="n">0.970</td></tr>
+<tr><td>AtomicChat 5.00bpw</td><td>Q8_0 · 54.4 GB</td><td class="n">170 B</td><td class="n">20.520</td><td class="n">20.683</td><td class="n">203</td><td class="n">0.932</td></tr>
+<tr class="hi"><td class="lbl">통합 (n=36)</td><td>—</td><td class="n">—</td><td class="n">20.54</td><td class="n">20.628</td><td class="n">209</td><td class="n">0.959</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  두 빌드는 본체 텐서 구성이 <b>완전히 같고</b>(IQ4_NL 32% · IQ2_S 48% · IQ3_S 16%) PLE 만 다르다.
+  웜 값이 20.552 vs 20.520 ms 로 일치해 <b>커널 항이 동일함</b>이 확인되고,
+  폴트당 비용도 211 vs 203 µs 로 <b>4% 이내</b>다.
+  <br><br>
+  즉 <b>테이블이 41% 커지고 행이 120 → 170 B 로 굵어져도 페이징 비용은 그대로다.</b>
+  두 행 크기 모두 4 KB 페이지 안에 들어가므로 토큰당 폴트 수가 16 으로 유지되기 때문이다 —
+  §1 표 1 의 페이지 단위 모델이 예측한 그대로다.
+</div>
+
+<h3>4.5 폴트당 비용의 불변성은 장치에 따라 다르다</h3>
+
+<div class="tw"><table>
+<caption>표 14 — 폴트 밀도에 따른 폴트당 비용</caption>
+<thead><tr><th>장치</th><th class="n">낮은 밀도</th><th class="n">중간</th><th class="n">높은 밀도</th><th class="n">변동</th></tr></thead>
+<tbody>
+<tr><td>NVMe (36점, 3분위)</td><td class="n">223 µs<br><span class="lbl">폴트 7.6</span></td><td class="n">216 µs<br><span class="lbl">폴트 9.4</span></td><td class="n">217 µs<br><span class="lbl">폴트 11.7</span></td><td class="n m">3%</td></tr>
+<tr class="hi"><td>HDD (7점)</td><td class="n">7,483 µs<br><span class="lbl">폴트 8.8</span></td><td class="n">7,281 µs<br><span class="lbl">폴트 10.7</span></td><td class="n">7,024 µs<br><span class="lbl">폴트 16.9</span></td><td class="n d">6%</td></tr>
+</tbody></table></div>
+
+<p><strong>NVMe 에서는 폴트당 비용이 밀도와 무관하게 일정하다</strong>(3% 이내).
+따라서 §4.2 에서 지적한 비선형성은 일반 성질이 아니라 <strong>기계식 디스크 고유 현상</strong>이다 —
+HDD 는 미스가 촘촘할수록 헤드 이동 순서를 최적화할 여지가 생겨 폴트당이 싸진다.
+NVMe 는 탐색이 없어 요청이 서로 독립이다.</p>
+
+<h3>4.6 탄력성 — 장치가 1% 느려지면 처리량은 몇 % 줄어드나</h3>
+
+<figure>
+<svg viewBox="0 0 740 310" role="img" aria-label="그림 2. 장치 지연 탄력성. 두 곡선 모두 같은 포화 쌍곡선이지만, HDD 는 미스 17.6퍼센트에서 0.5를 넘어 포화 구간으로 들어가고 NVMe 는 100퍼센트에서도 0.14에 그친다.">
+<line x1="58" y1="264.0" x2="616" y2="264.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="50" y="268.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">0.00</text>
+<line x1="58" y1="205.5" x2="616" y2="205.5" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="50" y="209.5" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">0.25</text>
+<line x1="58" y1="147.0" x2="616" y2="147.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="50" y="151.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">0.50</text>
+<line x1="58" y1="88.5" x2="616" y2="88.5" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="50" y="92.5" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">0.75</text>
+<line x1="58" y1="30.0" x2="616" y2="30.0" stroke="currentColor" stroke-width="1" opacity=".12"/>
+<text x="50" y="34.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".55">1.00</text>
+<text x="58.0" y="282" text-anchor="middle" font-size="11" fill="currentColor" opacity=".55">0%</text>
+<text x="197.5" y="282" text-anchor="middle" font-size="11" fill="currentColor" opacity=".55">25%</text>
+<text x="337.0" y="282" text-anchor="middle" font-size="11" fill="currentColor" opacity=".55">50%</text>
+<text x="476.5" y="282" text-anchor="middle" font-size="11" fill="currentColor" opacity=".55">75%</text>
+<text x="616.0" y="282" text-anchor="middle" font-size="11" fill="currentColor" opacity=".55">100%</text>
+<text x="50" y="20" text-anchor="end" font-size="10.5" fill="currentColor" opacity=".55">탄력성</text>
+<text x="337" y="304" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".65">페이지 캐시 미스율</text>
+<line x1="156.2" y1="264.0" x2="156.2" y2="147.0" stroke="var(--s2)" stroke-width="1.2" stroke-dasharray="4 3" opacity=".65"/>
+<text x="163.2" y="139.0" font-size="10.5" fill="var(--s2)">미스 17.6% 에서 디스크항 = 커널항</text>
+<path d="M58.0,264.0 L63.6,251.4 L69.2,240.1 L74.7,229.9 L80.3,220.7 L85.9,212.2 L91.5,204.5 L97.1,197.4 L102.6,190.9 L108.2,184.8 L113.8,179.2 L119.4,174.0 L125.0,169.1 L130.5,164.6 L136.1,160.3 L141.7,156.3 L147.3,152.5 L152.9,149.0 L158.4,145.7 L164.0,142.5 L169.6,139.5 L175.2,136.7 L180.8,134.0 L186.3,131.4 L191.9,129.0 L197.5,126.6 L203.1,124.4 L208.7,122.3 L214.2,120.3 L219.8,118.4 L225.4,116.5 L231.0,114.7 L236.6,113.0 L242.1,111.4 L247.7,109.8 L253.3,108.3 L258.9,106.8 L264.5,105.4 L270.0,104.0 L275.6,102.7 L281.2,101.5 L286.8,100.3 L292.4,99.1 L297.9,97.9 L303.5,96.8 L309.1,95.8 L314.7,94.7 L320.3,93.7 L325.8,92.8 L331.4,91.8 L337.0,90.9 L342.6,90.0 L348.2,89.2 L353.7,88.3 L359.3,87.5 L364.9,86.7 L370.5,85.9 L376.1,85.2 L381.6,84.5 L387.2,83.7 L392.8,83.1 L398.4,82.4 L404.0,81.7 L409.5,81.1 L415.1,80.5 L420.7,79.8 L426.3,79.2 L431.9,78.7 L437.4,78.1 L443.0,77.5 L448.6,77.0 L454.2,76.5 L459.8,75.9 L465.3,75.4 L470.9,74.9 L476.5,74.5 L482.1,74.0 L487.7,73.5 L493.2,73.1 L498.8,72.6 L504.4,72.2 L510.0,71.8 L515.6,71.3 L521.1,70.9 L526.7,70.5 L532.3,70.1 L537.9,69.7 L543.5,69.4 L549.0,69.0 L554.6,68.6 L560.2,68.3 L565.8,67.9 L571.4,67.6 L576.9,67.2 L582.5,66.9 L588.1,66.6 L593.7,66.2 L599.3,65.9 L604.8,65.6 L610.4,65.3 L616.0,65.0" fill="none" stroke="var(--s2)" stroke-width="2"/>
+<text x="624" y="69.0" font-size="12" font-weight="600" fill="var(--s2)">HDD</text>
+<text x="624" y="84.0" font-size="10.5" fill="currentColor" opacity=".6">천장 0.85</text>
+<circle cx="197.5" cy="126.6" r="3.4" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.6"><title>HDD · 미스 25% · 탄력성 0.59</title></circle>
+<circle cx="337.0" cy="90.9" r="3.4" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.6"><title>HDD · 미스 50% · 탄력성 0.74</title></circle>
+<circle cx="510.0" cy="71.8" r="3.4" fill="var(--s2)" stroke="var(--surface)" stroke-width="1.6"><title>HDD · 미스 81% · 탄력성 0.82</title></circle>
+<path d="M58.0,264.0 L63.6,263.6 L69.2,263.2 L74.7,262.9 L80.3,262.5 L85.9,262.1 L91.5,261.7 L97.1,261.4 L102.6,261.0 L108.2,260.6 L113.8,260.3 L119.4,259.9 L125.0,259.5 L130.5,259.2 L136.1,258.8 L141.7,258.4 L147.3,258.1 L152.9,257.7 L158.4,257.4 L164.0,257.0 L169.6,256.7 L175.2,256.3 L180.8,255.9 L186.3,255.6 L191.9,255.2 L197.5,254.9 L203.1,254.5 L208.7,254.2 L214.2,253.8 L219.8,253.5 L225.4,253.1 L231.0,252.8 L236.6,252.5 L242.1,252.1 L247.7,251.8 L253.3,251.4 L258.9,251.1 L264.5,250.8 L270.0,250.4 L275.6,250.1 L281.2,249.8 L286.8,249.4 L292.4,249.1 L297.9,248.8 L303.5,248.4 L309.1,248.1 L314.7,247.8 L320.3,247.4 L325.8,247.1 L331.4,246.8 L337.0,246.5 L342.6,246.1 L348.2,245.8 L353.7,245.5 L359.3,245.2 L364.9,244.8 L370.5,244.5 L376.1,244.2 L381.6,243.9 L387.2,243.6 L392.8,243.3 L398.4,242.9 L404.0,242.6 L409.5,242.3 L415.1,242.0 L420.7,241.7 L426.3,241.4 L431.9,241.1 L437.4,240.8 L443.0,240.5 L448.6,240.2 L454.2,239.8 L459.8,239.5 L465.3,239.2 L470.9,238.9 L476.5,238.6 L482.1,238.3 L487.7,238.0 L493.2,237.7 L498.8,237.4 L504.4,237.1 L510.0,236.8 L515.6,236.5 L521.1,236.2 L526.7,236.0 L532.3,235.7 L537.9,235.4 L543.5,235.1 L549.0,234.8 L554.6,234.5 L560.2,234.2 L565.8,233.9 L571.4,233.6 L576.9,233.3 L582.5,233.1 L588.1,232.8 L593.7,232.5 L599.3,232.2 L604.8,231.9 L610.4,231.6 L616.0,231.4" fill="none" stroke="var(--s1)" stroke-width="2"/>
+<text x="624" y="235.4" font-size="12" font-weight="600" fill="var(--s1)">NVMe</text>
+<text x="624" y="250.4" font-size="10.5" fill="currentColor" opacity=".6">천장 0.14</text>
+<circle cx="197.5" cy="254.9" r="3.4" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.6"><title>NVMe · 미스 25% · 탄력성 0.04</title></circle>
+<circle cx="337.0" cy="246.5" r="3.4" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.6"><title>NVMe · 미스 50% · 탄력성 0.07</title></circle>
+<circle cx="510.0" cy="236.8" r="3.4" fill="var(--s1)" stroke="var(--surface)" stroke-width="1.6"><title>NVMe · 미스 81% · 탄력성 0.12</title></circle>
+</svg>
+<figcaption><span class="fig">그림 2</span>
+<b>두 곡선은 같은 함수다</b> — <code>탄력성 = 16mL / (K + 16mL)</code>, 포화 쌍곡선.
+다른 것은 어느 구간에서 노느냐뿐이다. HDD 는 <b>미스 17.6%에서 디스크 항이 커널 항을 추월</b>해
+곧바로 포화로 들어가고(천장 0.85), NVMe 는 디스크 항이 100% 미스에서도 3.34 ms 라
+커널 항 20.6 ms 에 눌려 <b>천장이 0.14</b>다. NVMe 곡선이 직선처럼 보이는 것은
+<code>16mL ≪ K</code> 구간만 쓰기 때문이지 함수가 달라서가 아니다.</figcaption>
+</figure>
+
+<p><code>처리량 = 1/(커널항 + 디스크시간)</code> 이므로 장치 지연에 대한 탄력성은
+<strong>디스크 시간이 토큰 시간에서 차지하는 비중</strong>과 같다.</p>
+
+<div class="tw"><table>
+<caption>표 15 — 장치 지연 탄력성</caption>
+<thead><tr><th>조건</th><th class="n">미스율</th><th class="n">토큰 ms</th><th class="n">디스크 ms</th><th class="n">비중</th><th class="n">탄력성</th></tr></thead>
+<tbody>
+<tr><td>NVMe · 웜</td><td class="n">0%</td><td class="n">20.68</td><td class="n">0.00</td><td class="n">0%</td><td class="n m">0.00</td></tr>
+<tr><td>NVMe</td><td class="n">81%</td><td class="n">23.94</td><td class="n">3.26</td><td class="n">13.6%</td><td class="n">−0.14</td></tr>
+<tr><td>HDD · 웜</td><td class="n">0%</td><td class="n">20.49</td><td class="n">0.00</td><td class="n">0%</td><td class="n m">0.00</td></tr>
+<tr class="hi"><td>HDD</td><td class="n">81%</td><td class="n">118.70</td><td class="n">98.21</td><td class="n">82.7%</td><td class="n d">−0.83</td></tr>
+</tbody></table></div>
+
+<figure>
+<svg viewBox="0 0 740 250" role="img" aria-label="토큰 시간을 커널 항과 디스크 항으로 나눈 누적 막대. NVMe 는 미스 100%에서도 디스크가 14퍼센트, HDD 는 미스 50%에서 이미 74퍼센트를 차지한다.">
+<text x="46" y="45.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".75">NVMe · 웜</text>
+<rect x="54" y="26" width="87.1" height="30" rx="3" fill="currentColor" opacity=".22"><title>커널 항 20.6 ms</title></rect>
+<text x="151.1" y="45.0" font-size="11" font-weight="600" fill="currentColor">21 ms</text>
+<text x="199.1" y="45.0" font-size="10.5" fill="currentColor" opacity=".6">디스크 0%</text>
+<text x="46" y="85.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".75">NVMe · 미스 50%</text>
+<rect x="54" y="66" width="87.1" height="30" rx="3" fill="currentColor" opacity=".22"><title>커널 항 20.6 ms</title></rect>
+<rect x="143.1" y="66" width="5.1" height="30" rx="3" fill="var(--s2)"><title>디스크 1.7 ms</title></rect>
+<text x="158.2" y="85.0" font-size="11" font-weight="600" fill="currentColor">22 ms</text>
+<text x="206.2" y="85.0" font-size="10.5" fill="currentColor" opacity=".6">디스크 7%</text>
+<text x="46" y="125.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".75">NVMe · 미스 100%</text>
+<rect x="54" y="106" width="87.1" height="30" rx="3" fill="currentColor" opacity=".22"><title>커널 항 20.6 ms</title></rect>
+<rect x="143.1" y="106" width="12.1" height="30" rx="3" fill="var(--s2)"><title>디스크 3.3 ms</title></rect>
+<text x="165.2" y="125.0" font-size="11" font-weight="600" fill="currentColor">24 ms</text>
+<text x="213.2" y="125.0" font-size="10.5" fill="currentColor" opacity=".6">디스크 14%</text>
+<text x="46" y="165.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".75">HDD · 미스 50%</text>
+<rect x="54" y="146" width="86.5" height="30" rx="3" fill="currentColor" opacity=".22"><title>커널 항 20.5 ms</title></rect>
+<rect x="142.5" y="146" width="243.9" height="30" rx="3" fill="var(--s2)"><title>디스크 58.2 ms</title></rect>
+<text x="396.5" y="165.0" font-size="11" font-weight="600" fill="currentColor">79 ms</text>
+<text x="444.5" y="165.0" font-size="10.5" fill="currentColor" opacity=".6">디스크 74%</text>
+<text x="46" y="205.0" text-anchor="end" font-size="11" fill="currentColor" opacity=".75">HDD · 미스 100%</text>
+<rect x="54" y="186" width="86.5" height="30" rx="3" fill="currentColor" opacity=".22"><title>커널 항 20.5 ms</title></rect>
+<rect x="142.5" y="186" width="489.9" height="30" rx="3" fill="var(--s2)"><title>디스크 116.5 ms</title></rect>
+<text x="642.4" y="205.0" font-size="11" font-weight="600" fill="currentColor">137 ms</text>
+<text x="690.4" y="205.0" font-size="10.5" fill="currentColor" opacity=".6">디스크 85%</text>
+<rect x="54" y="232" width="14" height="11" rx="2" fill="currentColor" opacity=".22"/>
+<text x="74" y="241" font-size="10.5" fill="currentColor" opacity=".7">커널 항 (빌드)</text>
+<rect x="164" y="232" width="14" height="11" rx="2" fill="var(--s2)"/>
+<text x="184" y="241" font-size="10.5" fill="currentColor" opacity=".7">디스크 항 = 접근행수 × 미스율 × 폴트지연</text>
+</svg>
+<figcaption><span class="fig">그림 3</span><b>왜 장치마다 탄력성이 다른가.</b> 분모에 <b>커널 항 20.6 ms 가 고정으로 들어있기</b> 때문이다.
+NVMe 는 100% 미스에서도 디스크가 토큰 예산의 14%뿐이라 장치 성능 변화가 희석되고,
+HDD 는 50% 미스에서 이미 74% 를 차지해 거의 1:1 로 따라간다.
+디스크 접근 내부 구조(지연 대 전송)로는 설명되지 않는다 — 4 KB 랜덤 읽기는
+NVMe 98.5%, HDD 99.6% 로 <b>둘 다 지연 지배</b>다(표 2).</figcaption>
+</figure>
+
+<p><strong>NVMe 에서는 장치가 10% 느려져도 처리량 1.4% 손해</strong>이고, HDD 에서는 8.3% 다.
+같은 열화가 미스율에 따라 전혀 다른 대가를 부른다 — 곱 구조의 실용적 의미가 이것이다.
+모델 <code>커널항 + 16 × 미스율 × 폴트지연</code> 의 예측은 실측과
+NVMe ±2%, HDD ±3% 안에서 일치한다.</p>
+
+<h3>4.7 미스율 0 근처 — 평균은 매끄럽고 분포는 계단이다</h3>
+
+<p>"1바이트만 읽어도 디스크 지연은 온전히 낸다" 는 것은 사실이고, 그 고정비용은
+<strong>이미 <code>L</code> 안에 있다</strong> — <code>L</code> = 209 µs 는 전송 시간이 아니라
+접근 한 번의 총비용이고, 전송분은 2.6 µs(1.2%)뿐이다(표 2). 그래서 미스율 → 0 에서
+<strong>수직 점프는 생기지 않는다.</strong> x축이 접근 <em>횟수의 비율</em>이기 때문이다:
+미스율 0.0001% 는 "1바이트를 읽는다" 가 아니라 "62,500 토큰당 한 번 209 µs 를 낸다" 이고,
+토큰당 평균으로는 0.0000033 ms 다.</p>
+
+<div class="note">
+  <b>다만 분포는 다르다.</b> 낮은 미스율에서 토큰 시간은 <b>이봉분포</b>가 된다 —
+  대부분의 토큰이 20.6 ms, 드문 토큰이 20.6 + 0.209 ms. 평균은 연속이지만 개별 토큰은 계단이다.
+  이 보고서는 <b>처리량만</b> 다루므로 그 효과가 드러나지 않는다.
+  지연 백분위수(p99 등)를 볼 때는 별도 측정이 필요하다 — 미측정 항목이다(§10).
+</div>
+
+<h3>4.8 정정된 모델</h3>
+
+<p>이 보고서의 앞부분은 <code>고정 + 폴트수 × 폴트지연</code> 으로 썼다. 폴트수는 이미
+'미스한 접근'만 센 값이므로 수식은 같지만, <strong>세 인자를 분리하는 편이 유용하다</strong> —
+각각이 독립된 손잡이이기 때문이다.</p>
+
+<div class="tw"><table>
+<caption>표 16 — 4인자 모델. 토큰시간 = 커널항 + 접근행수 × 미스율 × 폴트지연</caption>
+<thead><tr><th>인자</th><th>무엇이 정하나</th><th class="n">실측 범위</th><th>바꾸는 법</th></tr></thead>
+<tbody>
+<tr><td>커널항</td><td>양자화 타입 (§8)</td><td class="n">18.20 ~ 20.96 ms</td><td>빌드 교체 (IQ3_S 가 −13%)</td></tr>
+<tr><td>접근 행 수</td><td><code>ple_ngram_size</code> 3 × <code>heads_per_ngram</code> 8</td><td class="n">16 · 고정</td><td>불가 — 아키텍처</td></tr>
+<tr><td>미스율</td><td>페이지 캐시 ÷ 테이블 크기, n-gram 편향</td><td class="n">0 ~ 100%</td><td>RAM 증설</td></tr>
+<tr class="hi"><td>폴트 지연</td><td>장치 · 경합</td><td class="n">204 ~ 7,280 µs</td><td>저장장치 · 부하 격리</td></tr>
+</tbody></table></div>
+
+<!-- ═══════════════ 5 ═══════════════ -->
+<h2 id="s5"><span class="n">5</span>커널 항 — 빌드가 바꾸는 것</h2>
+
+<div class="note">
+  <b>관찰 단위.</b> 이 보고서에는 <b>두 가지 모델</b>이 등장한다 —
+  Qwen 원본을 양자화한 <b>base</b> 계열(AtomicChat)과, 거부 방향을 제거한
+  <b>abliterated</b> 계열(mradermacher). 가중치 값이 다르므로
+  <b>절대 속도를 두 계열 사이에서 비교하지 않는다.</b>
+  §5 는 base 계열만 다루고, abliterated 계열은 §6 에서 <b>쌍 내부 비교로만</b> 쓴다.
+</div>
+
+<p>같은 하네스·같은 플래그·같은 프롬프트로 base 계열 세 빌드를 차례로 재기동하며 측정했다.
+VRAM 상주분이 46.4 → 55.6 GB 로 <strong>20% 차이</strong>가 나고, 뒤의 두 빌드는
+<strong>본체가 바이트 단위로 동일하고 PLE 만 다르다</strong> — 재현성 확인용이다.</p>
+
+<div class="tw"><table>
+<caption>표 17 — 대상 빌드</caption>
+<thead><tr><th>빌드</th><th class="n">총 GB</th><th>PLE (SSD)</th><th class="n">본체 GB</th><th class="n">본체 bpw</th><th class="n">VRAM GiB</th><th class="n">로딩 s</th><th>파일</th></tr></thead>
+<tbody>
+<tr><td>AtomicChat IQ4_XS</td><td class="n">84.9</td><td>Q5_1 · 38.4</td><td class="n">46.5</td><td class="n">2.98</td><td class="n">44.88</td><td class="n">95.5</td><td>샤드 28</td></tr>
+<tr><td>AtomicChat Q4_K_M</td><td class="n">92.9</td><td>Q5_1 · 38.4</td><td class="n">54.5</td><td class="n">3.49</td><td class="n">53.82</td><td class="n">114.2</td><td>샤드 33</td></tr>
+<tr class="hi"><td>AtomicChat Q5_K_M</td><td class="n">110.5</td><td>Q8_0 · 54.4</td><td class="n">55.6</td><td class="n">3.54</td><td class="n">53.82</td><td class="n">118.1</td><td>샤드 33</td></tr>
+</tbody></table></div>
+
+<h3>5.1 디코드 — 두 항이 서로를 지운다</h3>
+
+<div class="tw"><table>
+<caption>표 18 — 웜 디코드 (디스크 I/O 0)</caption>
+<thead><tr><th>빌드</th><th class="n">활성 GB/토큰</th><th class="n">이론 ms</th><th class="n">실측 ms</th><th class="n">웜 tok/s</th><th class="n">대역폭 효율</th></tr></thead>
+<tbody>
+<tr><td>IQ4_XS</td><td class="n">2.23</td><td class="n">1.40</td><td class="n">20.61</td><td class="n">48.52</td><td class="n">6.8%</td></tr>
+<tr><td>Q4_K_M</td><td class="n">2.62</td><td class="n">1.64</td><td class="n">20.60</td><td class="n">48.54</td><td class="n">8.0%</td></tr>
+<tr class="hi"><td>Q5_K_M <span class="lbl">(본체가 Q4_K_M 과 동일)</span></td><td class="n">2.62</td><td class="n">1.64</td><td class="n">20.52</td><td class="n">48.73</td><td class="n">8.0%</td></tr>
+<tr class="sep"><td class="lbl">범위</td><td class="n">+18%</td><td class="n">+18%</td><td class="n">−0.4%</td><td class="n">+0.4%</td><td class="n">—</td></tr>
+</tbody></table></div>
+
+<p>디코드가 평평하다고 두 항이 <em>없는</em> 것은 아니다. 대역폭 항을 빼고 나머지를 보면
+둘이 서로를 지운다는 것이 드러난다.</p>
+
+<div class="tw"><table>
+<caption>표 19 — 디코드 시간의 분해</caption>
+<thead><tr><th>빌드</th><th class="n">대역폭 ms</th><th class="n">나머지 ms</th><th class="n">Δ대역폭</th><th class="n">Δ나머지</th></tr></thead>
+<tbody>
+<tr><td>IQ4_XS</td><td class="n">1.391</td><td class="n">19.22</td><td class="n">—</td><td class="n">—</td></tr>
+<tr class="hi"><td>Q4_K_M</td><td class="n">1.666</td><td class="n">18.93</td><td class="n d">+0.276</td><td class="n m">−0.286</td></tr>
+<tr><td>Q5_K_M</td><td class="n">1.664</td><td class="n">18.86</td><td class="n">−0.002</td><td class="n">−0.076</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  <b>첫 두 빌드 사이에서 대역폭 +0.276 ms 와 언팩 −0.286 ms 가 거의 정확히 상쇄된다.</b>
+  세 번째 빌드에서는 언팩 절감이 바닥나 대역폭 항만 +0.6% 로 드러난다.
+  두 항 모두 실재하지만 여기서는 각각 1.4% 규모다.
+  <br><br>
+  이 빌드들만 보면 나머지 18.9 ms(91%)가 <b>양자화 타입과 무관한 고정 오버헤드</b>처럼 보인다.
+  <b>§6 이 그 해석을 기각한다</b> — 이들이 우연히 비슷한 커널 비용을 가졌을 뿐이다.
+  (Q4_K_M 과 Q5_K_M 은 본체가 동일하므로 18.93 vs 18.86 ms 는 <b>측정 재현성</b>을 보여준다 — 편차 0.4%.)
+</div>
+
+<p>덧붙여 파일 이름이 오해를 부른다. 헤더를 열어 보면 AtomicChat 의 "Q4_K_M" 은
+<strong>K-quant 빌드가 아니다</strong> — 실제 텐서는 IQ4_NL / IQ2_S / IQ3_S 다.
+그들은 파일명을 <em>실측 평균 bpw 에 가장 가까운 표준 타입</em>으로 붙인다.
+따라서 세 빌드는 "IQ 대 K" 가 아니라 <strong>언팩 비용의 3점 기울기</strong>다:
+MXFP4·IQ1_M → IQ2_S·IQ3_S·IQ4_NL → Q3_K·Q4_0.</p>
+
+<h3>5.2 프리필 — 여기서는 양자화 타입이 크게 갈린다</h3>
+
+<div class="tw"><table>
+<caption>표 20 — 프리필 처리량 (같은 텍스트)</caption>
+<thead><tr><th>빌드</th><th class="n">6k 콜드</th><th class="n">6k 웜</th><th class="n">30k 콜드</th><th class="n">30k 웜</th><th class="n">웜 대비</th></tr></thead>
+<tbody>
+<tr><td>IQ4_XS</td><td class="n">220.7</td><td class="n">459.5</td><td class="n">231.2</td><td class="n">486.3</td><td class="n">1.00×</td></tr>
+<tr class="hi"><td>Q4_K_M</td><td class="n">251.6</td><td class="n">619.6</td><td class="n">262.1</td><td class="n">665.4</td><td class="n">1.37×</td></tr>
+
+</tbody></table></div>
+
+<p>디코드가 평평한 것과 정반대로 <strong>프리필은 1.37배 벌어진다.</strong>
+프리필은 배치 행렬곱이라 토큰당 고정 오버헤드가 희석되고 커널 효율이 그대로 드러난다.
+IQ 계열이 가장 느리고 순수 K-quant 가 가장 빠르다.</p>
+
+<div class="note">
+  <b>여기서 보이는 '언팩 절감이 프리필에서 더 크다'는 비대칭은 실재하지 않는다.</b>
+  세 빌드가 양자화 타입과 <b>본체 크기를 동시에</b> 바꾸기 때문에 생긴 착시다.
+  §6 에서 본체를 0.3% 안에 묶고 타입만 바꾸면 두 축의 상대 효과가 −13.1% 대 −13.7% 로 같아진다.
+</div>
+
+<h3>5.3 페이징 비용은 빌드와 무관하다</h3>
+
+<div class="tw"><table>
+<caption>표 21 — 콜드/웜 및 자원 사용</caption>
+<thead><tr><th>빌드</th><th class="n">콜드 tok/s</th><th class="n">페이징 비용</th><th class="n">콜드 폴트/토큰</th><th class="n">SM%</th><th class="n">mem%</th><th class="n">W</th></tr></thead>
+<tbody>
+<tr><td>IQ4_XS</td><td class="n">41.46</td><td class="n">14.6%</td><td class="n">23.48</td><td class="n">86</td><td class="n">19</td><td class="n">163</td></tr>
+<tr class="hi"><td>Q4_K_M</td><td class="n">42.06</td><td class="n">13.4%</td><td class="n">21.35</td><td class="n">84</td><td class="n">19</td><td class="n">166</td></tr>
+
+</tbody></table></div>
+
+<p>PLE 테이블이 38.4 GB(Q5_1)든 28.8 GB(Q4_0)든 페이징 비용은 <strong>13~15% 로 같다.</strong>
+토큰당 접근 행 수(16)가 테이블 크기와 무관하기 때문이다 — §3.1 의 폴트 모델이
+빌드에 독립적임을 확인한다.</p>
+
+<div class="key">
+  <b>실용적 결론 — VRAM 에 들어가는 한 큰 빌드가 공짜다.</b>
+  본체를 46.5 → 60.0 GB 로 키워도 디코드는 그대로고 프리필은 오히려 빨라진다.
+  이 하드웨어에서 빌드 선택 규칙은 단순하다: <b>VRAM 에 들어가는 것 중 가장 품질이 높은 것.</b>
+  속도로 잃는 것이 없다.
+</div>
+
+<h3>5.4 부수 관찰 — 샤드 분할과 로딩</h3>
+
+<div class="tw"><table>
+<caption>표 22 — 콜드 로딩 처리량 <span class="tag der">유도</span></caption>
+<thead><tr><th>빌드</th><th>파일</th><th class="n">읽을 본체 GB</th><th class="n">로딩 s</th><th class="n">실효 MB/s</th></tr></thead>
+<tbody>
+<tr><td>IQ4_XS</td><td>샤드 28</td><td class="n">46.5</td><td class="n">95.5</td><td class="n">487</td></tr>
+<tr><td>Q4_K_M</td><td>샤드 33</td><td class="n">55.6</td><td class="n">114.2</td><td class="n">487</td></tr>
+<tr><td>Q5_K_M</td><td>샤드 33</td><td class="n">55.6</td><td class="n">118.1</td><td class="n">471</td></tr>
+<tr class="hi"><td>Q3_K_S <span class="tag der">AL · 별도 관찰</span></td><td>단일 파일</td><td class="n">59.9</td><td class="n">63.0</td><td class="n">951</td></tr>
+
+</tbody></table></div>
+
+<p>단일 파일 빌드가 더 많이 읽는데도 <strong>2배 빠르게</strong> 적재된다(951 vs 480 MB/s).
+적재 시간은 가중치 <em>값</em>과 무관하게 파일 배치와 크기만 타므로, 이 한 항목에 한해
+계열을 건너 비교해도 된다.
+세 측정의 페이지 캐시 상태가 완전히 같지는 않았으므로 유도로 표시하지만 방향은 분명하다 —
+샤드를 잘게 쪼개면 순차 읽기가 끊긴다. 참고로 AtomicChat 이 샤드를 2 GB 로 자른 것은
+<strong>Apple Silicon 에서 테이블을 독립 샤드로 격리하기 위한 것</strong>이고, CUDA 에서는
+그 이점이 없다.</p>
+
+<h3>5.5 정합성</h3>
+
+<div class="tw"><table>
+<caption>표 23 — 한국어 생성 (temperature 0.7)</caption>
+<thead><tr><th>빌드</th><th>출력 (발췌)</th></tr></thead>
+<tbody>
+<tr><td>IQ4_XS</td><td style="white-space:normal;text-align:left">저는 25살이고, 학생입니다. 저는 한국에서 태어났고, 서울에 살고 있습니다.</td></tr>
+<tr><td>Q4_K_M</td><td style="white-space:normal;text-align:left">안녕하세요, 여러분의 질문에 정확하고 친절한 답변을 드리기 위해 최선을 다하는 인공지능 어시스턴트입니다.</td></tr>
+
+</tbody></table></div>
+
+<p>셋 다 반복·깨짐 없이 정상이다. 다만 이는 <strong>정합성 확인이지 품질 비교가 아니다</strong> —
+KLD 나 top-1 을 재려면 BF16 참조 로짓이 필요하고, 그 360 GB 는 이 박스에 들어가지 않는다.</p>
+
+
+<!-- ═══════════════ 6 ═══════════════ -->
+<h2 id="s6"><span class="n">6</span>언팩 비용 분리 — 대역폭을 묶고 타입만 바꾼다</h2>
+
+<div class="note">
+  <b>계열이 다르다.</b> 이 절의 두 빌드는 <b>abliterated 변종</b>(거부 방향을 제거한 가중치)이다.
+  §5 의 base 계열과 <b>절대 속도를 비교하지 않는다.</b> 여기서 쓰는 것은
+  <b>같은 가중치를 양자화만 바꿔 짝지은 쌍 내부의 차이</b>뿐이고, 그 비교는 계열과 무관하게 유효하다.
+</div>
+
+<p>§5 의 빌드들은 양자화 타입이 바뀔 때 본체 크기도 함께 변해 두 항을 분리하지 못했다.
+같은 제작자·같은 가중치에서 <strong>본체 크기가 0.3% 안에 일치</strong>하는 두 빌드를 찾아
+대조군으로 삼았다.</p>
+
+<div class="tw"><table>
+<caption>표 24 — 대조군 구성 (헤더 실측)</caption>
+<thead><tr><th></th><th>i1-Q3_K_S</th><th>i1-IQ3_S</th></tr></thead>
+<tbody>
+<tr><td class="lbl">본체</td><td class="n">59.9 GB</td><td class="n">60.1 GB &nbsp;<span class="m">+0.3%</span></td></tr>
+<tr><td class="lbl">256블록 텐서</td><td>Q3_K &nbsp;67.1%</td><td>IQ3_S &nbsp;66.3%</td></tr>
+<tr><td class="lbl">32블록 텐서</td><td>Q4_0 &nbsp;32.3%</td><td>IQ4_NL &nbsp;32.3%</td></tr>
+<tr><td class="lbl">PLE (SSD)</td><td class="n">Q4_0 · 28.8 GB</td><td class="n">IQ4_NL · 28.8 GB</td></tr>
+<tr><td class="lbl">텐서 수</td><td class="n">1,224</td><td class="n">1,224</td></tr>
+<tr class="hi"><td class="lbl">VRAM</td><td class="n">57.59 GiB</td><td class="n">57.71 GiB</td></tr>
+</tbody></table></div>
+
+<div class="tw"><table>
+<caption>표 25 — 결과. 대역폭 항이 0.006 ms 안에 묶였다</caption>
+<thead><tr><th>지표</th><th class="n">Q3_K_S</th><th class="n">IQ3_S</th><th class="n">차이</th></tr></thead>
+<tbody>
+<tr class="hi"><td>웜 디코드 tok/s</td><td class="n">47.72</td><td class="n">54.94</td><td class="n m">+15.1%</td></tr>
+<tr><td class="lbl">&nbsp;&nbsp;ms/토큰</td><td class="n">20.955</td><td class="n">18.202</td><td class="n">−2.753</td></tr>
+<tr><td class="lbl">&nbsp;&nbsp;대역폭 항</td><td class="n">1.795</td><td class="n">1.801</td><td class="n">+0.006</td></tr>
+<tr><td class="lbl">&nbsp;&nbsp;나머지(커널)</td><td class="n">19.160</td><td class="n">16.401</td><td class="n d">−2.759</td></tr>
+<tr class="sep"><td>웜 프리필 6k</td><td class="n">713.6</td><td class="n">817.9</td><td class="n m">+14.6%</td></tr>
+<tr class="hi"><td>웜 프리필 30k</td><td class="n">780.1</td><td class="n">904.1</td><td class="n m">+15.9%</td></tr>
+<tr class="sep"><td>콜드 디코드</td><td class="n">43.96</td><td class="n">49.07</td><td class="n">+11.6%</td></tr>
+<tr><td class="lbl">&nbsp;&nbsp;폴트당 비용</td><td class="n">204 µs</td><td class="n">216 µs</td><td class="n">+6%</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  <b>§7.1 의 '고정 오버헤드' 해석을 기각한다.</b> 대역폭을 0.006 ms 안에 묶었는데
+  나머지 항이 <b>2.76 ms — 토큰시간의 13% — 움직였다.</b> 그 항은 고정이 아니라
+  <b>양자화 타입에 따라 변하는 커널 비용</b>이다.
+  <br><br>
+  그리고 방향이 통념과 반대다. i-quant 는 코드북 조회 때문에 더 비싸다고 알려져 있는데,
+  <b>IQ3_S/IQ4_NL 조합이 Q3_K/Q4_0 조합보다 디코드·프리필 양쪽에서 15% 빠르다.</b>
+</div>
+
+<h3>6.1 세 빌드가 48 tok/s 에 뭉친 것은 우연이었다</h3>
+
+<div class="tw"><table>
+<caption>표 26 — 주 텐서 타입별 디코드 시간</caption>
+<thead><tr><th>빌드</th><th>주 텐서 (48~67%)</th><th>부 텐서 (32%)</th><th class="n">본체 GB</th><th class="n">ms/토큰</th></tr></thead>
+<tbody>
+<tr><td>AtomicChat IQ4_XS</td><td>IQ1_M</td><td>MXFP4</td><td class="n">46.4</td><td class="n">20.61</td></tr>
+<tr><td>AtomicChat Q4_K_M</td><td>IQ2_S</td><td>IQ4_NL</td><td class="n">55.6</td><td class="n">20.60</td></tr>
+<tr><td>mradermacher Q3_K_S</td><td>Q3_K</td><td>Q4_0</td><td class="n">59.9</td><td class="n">20.96</td></tr>
+<tr class="hi"><td>mradermacher IQ3_S</td><td>IQ3_S</td><td>IQ4_NL</td><td class="n">60.1</td><td class="n">18.20</td></tr>
+</tbody></table></div>
+
+<p>IQ1_M · IQ2_S · Q3_K 세 타입의 커널 비용이 <strong>우연히 비슷했을</strong> 뿐이고,
+IQ3_S 만 확연히 싸다. 천장이 아니라 군집이었다. 다만 빌드가 4개뿐이고 타입이 여럿 함께
+바뀌므로, <strong>특정 타입 하나에 인과를 돌리기에는 근거가 부족하다</strong> —
+확실한 것은 <em>IQ3_S+IQ4_NL 조합이 Q3_K+Q4_0 조합보다 13% 싸다</em>는 짝지은 사실이다.</p>
+
+<h3>6.2 §7.2 의 비대칭은 착시였다</h3>
+
+<div class="tw"><table>
+<caption>표 27 — 같은 타입 교체가 두 축에 주는 상대 효과</caption>
+<thead><tr><th></th><th class="n">Q3_K_S</th><th class="n">IQ3_S</th><th class="n">변화</th></tr></thead>
+<tbody>
+<tr><td>디코드 ms/토큰</td><td class="n">20.955</td><td class="n">18.202</td><td class="n">−13.1%</td></tr>
+<tr><td>프리필 30k ms/토큰</td><td class="n">1.282</td><td class="n">1.106</td><td class="n">−13.7%</td></tr>
+</tbody></table></div>
+
+<p>본체 크기를 묶으면 <strong>두 축의 상대 효과가 같다.</strong>
+§7.2 에서 "언팩 절감이 프리필에서 더 크다" 고 보였던 것은
+비교한 빌드들이 본체 크기까지 함께 바꿨기 때문이다.</p>
+
+<h3>6.3 페이징 항은 여전히 빌드에 무관하다</h3>
+
+<p>폴트당 비용은 <strong>204 vs 216 µs</strong> 로 6% 이내다. 커널 항이 13% 움직이는 동안에도
+그렇다는 것은 <strong>페이징 항과 커널 항이 서로 독립</strong>이라는 뜻이다.
+§4 의 모델은 다음과 같이 정정된다 —
+<code>토큰시간 = 커널항(빌드 의존) + 폴트수 × 폴트지연(장치 의존)</code>.</p>
+
+<div class="key">
+  <b>실용적 결론 정정.</b> 이 보고서의 이전 판은 같은 VRAM 대에서 i1-Q3_K_S 를 권했다.
+  <b>i1-IQ3_S 가 옳다</b> — 같은 VRAM(57.6 vs 57.7 GiB)에서 디코드·프리필 모두 15% 빠르고,
+  저비트에서 i-quant 의 비트당 품질이 K-quant 보다 나은 것이 일반적이라 두 축 모두 우세하다.
+</div>
+
+<!-- ═══════════════ 7 ═══════════════ -->
+<h2 id="s7"><span class="n">7</span>왜 이 텐서만 되는가</h2>
+
+<h3>7.1 왜 이 텐서만 되는가</h3>
+
+<div class="tw"><table>
+<caption>표 28 — 같은 "희소 접근"의 두 종류</caption>
+<thead><tr><th></th><th>MoE 전문가</th><th>PLE 테이블</th></tr></thead>
+<tbody>
+<tr><td class="lbl">무엇이 주소를 정하나</td><td>학습된 라우터 — 매 토큰 다름</td><td>직전 2~3 토큰의 해시 — 순수 함수</td></tr>
+<tr><td class="lbl">ggml 연산</td><td><code>MUL_MAT_ID</code></td><td><code>GET_ROWS</code></td></tr>
+<tr><td class="lbl">조각 하나</td><td class="n">수백 MB</td><td class="n">120 B</td></tr>
+<tr><td class="lbl">토큰당 전송</td><td class="n">2.2 GB</td><td class="n">1,920 B</td></tr>
+<tr><td class="lbl">미스 한 번의 대가</td><td class="n">수백 MB 전송</td><td class="n m">183 µs</td></tr>
+<tr class="hi"><td class="lbl">페이징</td><td>불가능</td><td>가능 (−12.4% 상한)</td></tr>
+</tbody></table></div>
+
+<p>성패를 가르는 것은 희소성이 아니라 <strong>주소의 예측 가능성 × 조각의 크기</strong>다.
+"활성 파라미터가 6B 뿐"이라는 사실은 <strong>용량이 아니라 속도</strong>를 결정한다 —
+어느 6B 인지 미리 알 수 없으므로 512개 전문가 전부가 VRAM 에 있어야 한다.</p>
+
+<h3>7.2 imatrix 가 여기서 만나는 지점</h3>
+
+<p>importance matrix 는 실제 모델을 코퍼스에 돌려 <strong>각 입력 열이 어떤 크기의 활성값과
+곱해지는지</strong>를 누적한 표다. 양자화의 목적함수를
+<code>Σ(w−ŵ)²</code> 에서 <code>Σ importance·(w−ŵ)²</code> 로 바꾼다. 런타임 비용은 0이고
+파일 안의 숫자만 달라진다. 그런데 —</p>
+
+<div class="note">
+  <b>PLE 테이블은 imatrix 를 받을 수 없다.</b> <code>llama-imatrix</code> 는
+  <code>MUL_MAT</code> 과 <code>MUL_MAT_ID</code> 만 수집하고 나머지 연산은 건너뛴다
+  (<code>tools/imatrix/imatrix.cpp:246-247</code>). <code>GET_ROWS</code> 인 이 텐서는
+  코퍼스를 아무리 키워도 통계가 0개다. <b>51.2B 가 영구히 눈감고 양자화된다.</b>
+</div>
+
+<p>그런데 이 테이블은 비트에도 둔감하다 — 6비트와 8.5비트의 평균 KLD 차이가
+0.0005(오차막대 내)로 보고돼 있다. 두 사실이 합쳐지면 최적 전략이 갈린다.</p>
+
+<div class="tw"><table>
+<caption>표 29 — 비트를 어디에 쓸 것인가</caption>
+<thead><tr><th></th><th>PLE 테이블</th><th>MoE 전문가</th></tr></thead>
+<tbody>
+<tr><td class="lbl">사는 곳</td><td>NVMe (페이징)</td><td>VRAM (상주)</td></tr>
+<tr><td class="lbl">비트를 늘릴 때의 대가</td><td>파일만 커짐 · 속도 −0~1%</td><td class="d">VRAM 을 그만큼 먹음</td></tr>
+<tr><td class="lbl">imatrix 적용</td><td class="d">불가</td><td class="m">가장 크게 유효</td></tr>
+<tr class="hi"><td class="lbl">전략</td><td>날 비트를 더 준다</td><td>imatrix 로 정밀하게 깎는다</td></tr>
+</tbody></table></div>
+
+<p>이것이 비대칭 양자화가 <strong>이 하드웨어 구성에서 따라나오는 결론</strong>인 이유다.
+64 GiB VRAM 이라는 제약은 전문가 쪽에만 걸리고, 테이블 쪽 비트는 실질적으로 공짜다.</p>
+
+<div class="tw"><table>
+<caption>표 30 — 공개 빌드의 비트 배분 (64 GiB VRAM 기준)</caption>
+<thead><tr><th>빌드</th><th class="n">테이블 bpw</th><th class="n">본체 bpw</th><th class="n">본체 크기</th><th>68.72 GB</th></tr></thead>
+<tbody>
+<tr><td>AtomicChat AD-3.84 <span class="tag meas">본 실험 대상</span></td><td class="n">6.00</td><td class="n">2.98</td><td class="n">46.5 GB</td><td class="m">✓</td></tr>
+<tr><td>AtomicChat AD-4.27</td><td class="n">6.00</td><td class="n">3.49</td><td class="n">54.5 GB</td><td class="m">✓</td></tr>
+<tr><td>mradermacher i1-Q3_K_S</td><td class="n">4.50</td><td class="n">3.84</td><td class="n">60.0 GB</td><td class="m">✓</td></tr>
+<tr><td>orcarouter IQ3_M</td><td class="n">4.50</td><td class="n">3.88</td><td class="n">60.7 GB</td><td class="m">✓</td></tr>
+<tr class="sep"><td>orcarouter IQ4_XS</td><td class="n">4.50</td><td class="n">4.40</td><td class="n">68.7 GB</td><td class="d">✗</td></tr>
+<tr><td>cygnal IQ4XS-NGQ4</td><td class="n">4.50</td><td class="n">4.44</td><td class="n">69.4 GB</td><td class="d">✗</td></tr>
+<tr><td>unsloth UD-Q4_K_XL</td><td class="n">4.50</td><td class="n">5.28</td><td class="n">82.5 GB</td><td class="d">✗</td></tr>
+</tbody></table></div>
+
+<p>테이블 비트를 6.00 으로 <strong>올린</strong> 빌드만이 본체를 64 GiB 안으로 넣었다.
+<code>NGQ4</code> 는 유일하게 테이블을 따로 건드린 빌드인데 방향이 반대다 —
+페이징되어 공짜인 자리를 아끼고 정작 부족한 본체에는 돌려주지 않았다.</p>
+
+<h3>7.3 병목은 디스크가 아니다</h3>
+
+<div class="tw"><table>
+<caption>표 31 — 웜 조건(디스크 0)에서의 자원 사용</caption>
+<thead><tr><th>지표</th><th class="n">실측</th><th>해석</th></tr></thead>
+<tbody>
+<tr><td>디코드</td><td class="n">47.88 tok/s · 20.89 ms/tok</td><td>—</td></tr>
+<tr><td>이론 하한 (대역폭)</td><td class="n">1.40 ms/tok</td><td>활성 6B × 2.96 bpw ÷ 1,592.8 GB/s</td></tr>
+<tr class="hi"><td>대역폭 효율</td><td class="n">6.7%</td><td>—</td></tr>
+<tr class="sep"><td>SM 사용률</td><td class="n">87 – 97%</td><td>꽉 찼다</td></tr>
+<tr><td>메모리 컨트롤러</td><td class="n">19 – 21%</td><td class="d">79% 놀고 있다</td></tr>
+<tr><td>전력</td><td class="n">150 W / 250 W 캡</td><td>여유 100 W</td></tr>
+<tr><td>SM 클럭</td><td class="n">1,470 / 1,695 MHz</td><td>54°C · 스로틀 아님</td></tr>
+</tbody></table></div>
+
+<p>디코드는 원래 메모리 대역폭에 묶여야 하는데 <strong>메모리가 놀고 SM 만 타고 있다.</strong>
+<strong>디스크를 무한히 빠르게 해도 천장은 47.88 tok/s 다.</strong> 그렇다면 남는 20 ms 는
+무엇인가 — §7 의 3빌드 비교가 대역폭 가설과 역양자화 가설을 모두 기각한다.</p>
+
+
+<h3>7.4 그럼 다른 모델은 — 규칙의 일반화</h3>
+
+<p>이 텐서가 되는 이유는 <strong>크기가 작아서가 아니다</strong> — 36 GiB 로 이 모델에서 제일 크다.
+조건은 두 개이고 <strong>둘 다</strong> 있어야 한다.</p>
+
+<div class="key">
+  <b>페이징 가능 = 색인 접근 × 작은 조각.</b>
+  <br>① 어느 부분이 필요한지가 <b>주소로 정해진다</b> — 학습된 판단이 아니라.
+  <br>② 그 조각을 읽는 <b>디스크 시간이 토큰 예산 안에 들어온다.</b>
+</div>
+
+<div class="tw"><table>
+<caption>표 32 — 무엇이 페이징 가능한가 (토큰 예산 20.6 ms 기준)</caption>
+<thead><tr><th>대상</th><th class="n">토큰당</th><th class="n">디스크 시간</th><th class="n">예산 대비</th><th>판정</th></tr></thead>
+<tbody>
+<tr class="hi"><td>PLE 테이블 — 16행 색인</td><td class="n">64 KB</td><td class="n">3.3 ms</td><td class="n">16%</td><td class="m">가능 (실측)</td></tr>
+<tr><td>dense 모델의 토큰 임베딩 — 1행 색인</td><td class="n">4 KB</td><td class="n">0.2 ms</td><td class="n">1%</td><td class="m">조건은 맞음</td></tr>
+<tr class="sep"><td>MoE 전문가 1개</td><td class="n">62 MB</td><td class="n">38 ms</td><td class="n">184%</td><td class="d">사실상 불가</td></tr>
+<tr><td>MoE 전문가 10개 — 토큰당 활성 전부</td><td class="n">620 MB</td><td class="n">378 ms</td><td class="n">1,836%</td><td class="d">불가</td></tr>
+<tr><td>dense 모델의 일부 8 GB</td><td class="n">8 GB</td><td class="n">5.0 s</td><td class="n">24,272%</td><td class="d">불가</td></tr>
+<tr><td>dense 모델 64 GB 전체</td><td class="n">64 GB</td><td class="n">40 s</td><td class="n">194,175%</td><td class="d">불가</td></tr>
+</tbody></table></div>
+
+<p><strong>dense 모델에는 이 수법을 쓸 수 없다.</strong> 정의상 모든 가중치가 매 토큰 쓰이므로,
+일부만 디스크에 둬도 그 일부를 <strong>토큰마다 통째로</strong> 읽어야 한다. 8 GB 만 밖에 둬도
+토큰당 5초다. dense 모델은 <strong>전부 VRAM 에 들어가야 하고</strong>, 그때의 속도는
+대역폭이 정한다 — 이 카드에서 64 GB 를 채우면 이론 상한이 <strong>25 tok/s</strong> 다
+(64 GB ÷ 1,592.8 GB/s = 40.2 ms/토큰).</p>
+
+<p>dense 모델에도 색인 텐서는 있다. <code>token_embd</code> 는 토큰 ID 로 한 행만 뽑는
+<code>GET_ROWS</code> 라 조건을 만족한다. 다만 어휘 150k × hidden 5,120 이면 BF16 으로
+<strong>1.5 GB 남짓</strong>이라 64 GB 예산에서 빼봐야 실익이 없고, 출력 헤드는
+<strong>행렬곱</strong>이라(매 토큰 전체 어휘에 대해 로짓을 낸다) 애초에 대상이 아니다.
+가중치가 묶여 있으면 분리조차 안 된다.</p>
+
+<h3>7.5 중간 지대 — 차가운 전문가</h3>
+
+<p>전문가 하나는 <strong>62 MB</strong> 다. 토큰당 활성인 10개를 전부 디스크에 두면 378 ms 로 죽지만,
+<strong>거의 안 쓰이는 전문가만</strong> 페이징하는 것은 다른 이야기다. 라우터 선택이 편향돼 있다면
+뜨거운 것은 VRAM 에, 차가운 것은 디스크에 둘 수 있다.</p>
+
+<div class="tw"><table>
+<caption>표 33 — 토큰당 콜드 전문가가 몇 개면 얼마인가 <span class="tag der">유도</span></caption>
+<thead><tr><th class="n">토큰당 콜드 전문가</th><th class="n">추가 시간</th><th class="n">디코드</th><th class="n">웜 대비</th></tr></thead>
+<tbody>
+<tr><td class="n">0</td><td class="n">0</td><td class="n">48.5 tok/s</td><td class="n">—</td></tr>
+<tr class="hi"><td class="n">0.1 — 10 토큰에 한 번</td><td class="n">3.8 ms</td><td class="n">41 tok/s</td><td class="n">−15%</td></tr>
+<tr><td class="n">1 — 활성 10개 중 하나</td><td class="n">38 ms</td><td class="n">17 tok/s</td><td class="n d">−65%</td></tr>
+<tr><td class="n">2</td><td class="n">76 ms</td><td class="n">10 tok/s</td><td class="n d">−79%</td></tr>
+</tbody></table></div>
+
+<p>토큰당 0.1개 수준이면 <strong>PLE 페이징과 비슷한 대가</strong>이고, 1개만 돼도 3배 느려진다.
+성립하려면 라우터 편향이 아주 세야 하며 그것은 모델마다 다르다 —
+<strong>일반 규칙이 아니라 측정해야 아는 것</strong>이고, 이 보고서는 재지 않았다.</p>
+
+<!-- ═══════════════ 8 ═══════════════ -->
+<h2 id="s8"><span class="n">8</span>방식 비교와 트레이드오프</h2>
+
+<p>같은 일을 하는 방식이 셋 있다. 어느 것이든 <strong>토큰당 16행</strong>만 꺼내면 되고,
+그 결과는 비트 단위로 같다. 다른 것은 <strong>그 16행이 어디 있느냐</strong>뿐이다.</p>
+
+<div class="tw"><table>
+<caption>표 34 — 토큰 하나가 끌어오는 양</caption>
+<thead><tr><th>방식</th><th class="n">테이블 정밀도</th><th class="n">필요한 데이터</th><th class="n">실제 전송량</th><th class="n">초당</th></tr></thead>
+<tbody>
+<tr><td>전부 VRAM</td><td class="n">6 bpw</td><td class="n">1.9 KB</td><td class="n">— (VRAM 내부)</td><td class="n">—</td></tr>
+<tr><td>FreeToken — pinned RAM</td><td class="n">8 bpw</td><td class="n">2.6 KB</td><td class="n">2.6 KB</td><td class="n">124 KB/s</td></tr>
+<tr class="hi"><td>SSD 페이징</td><td class="n">6 bpw</td><td class="n">1.9 KB</td><td class="n">최대 64 KB</td><td class="n">최대 2.7 MB/s</td></tr>
+<tr class="sep"><td class="lbl">(대조) 전문가를 매번 교체</td><td class="n">—</td><td class="n d">2.21 GB</td><td class="n d">2.21 GB</td><td class="n d">93 GB/s</td></tr>
+</tbody></table></div>
+
+<p>맨 아랫줄이 <strong>왜 보통은 안 되는가</strong>다. 전문가 가중치를 저장 계층에 두면
+42 tok/s 를 내는 데 <strong>초당 93 GB</strong> 가 필요하다. n-gram 테이블은 <strong>34,000배 적다.</strong>
+FreeToken 의 정밀도는 공개된 pinned 용량 47.7 GiB ÷ 51.2B 파라미터 = 정확히 1.00 B/파라미터에서 나온다.</p>
+
+<p>SSD 페이징만 전송량이 데이터의 <strong>34배</strong>다(§3.1). 필요한 건 1.9 KB 인데 디스크는
+4 KB 페이지 단위로만 읽고 16행이 서로 다른 페이지에 흩어져 있기 때문이며, 64 KB 는
+<strong>미스율 100% 일 때의 상한</strong>이다.</p>
+
+<h3>8.1 대가</h3>
+
+<p>이 보고서의 앞부분은 SSD 페이징이 <em>얼마나 싼가</em>를 쟀다. 대가도 같은 측정에서 나온다.</p>
+
+<div class="tw"><table>
+<caption>표 35 — SSD 페이징이 내주는 것 (전부 실측)</caption>
+<thead><tr><th>대가</th><th class="n">크기</th><th>어디서 나왔나</th></tr></thead>
+<tbody>
+<tr><td>디코드 손해</td><td class="n d">0 ~ 14%</td><td>미스율에 비례 (§3.1, §4.4)</td></tr>
+<tr><td>콜드 프리필 손해</td><td class="n d">최대 2.5배</td><td>30k 프롬프트 첫 처리 665 → 262 tok/s (§5.2)</td></tr>
+<tr><td>성능의 예측 가능성</td><td class="n d">41.9 ~ 48.5 tok/s</td><td>캐시 상태에 따라 (§4.4)</td></tr>
+<tr><td>디스크 경합 취약성</td><td class="n d">−25%</td><td>경쟁 읽기 57k op/s (§4.1)</td></tr>
+<tr><td>지연 분포</td><td class="n">미측정</td><td>낮은 미스율에서 이봉일 수 있다 (§4.7)</td></tr>
+<tr class="sep"><td>SSD 쓰기 · 수명</td><td class="n m">쓰기 0</td><td>clean page · 순수 읽기 (§1)</td></tr>
+</tbody></table></div>
+
+<div class="key">
+  <b>전부 VRAM 에 올릴 수 있다면 그게 언제나 낫다.</b> SSD 페이징이 이기는 조건은 하나뿐이다 —
+  <b>다른 방법으로는 아예 안 뜰 때.</b>
+  <br><br>
+  그리고 그때 결정적인 것은 속도가 아니라 <b>실패가 연속적</b>이라는 성질이다.
+  RAM 이 모자라면 히트율이 떨어져 조금 느려질 뿐 뜨느냐 마느냐가 바뀌지 않는다.
+  FreeToken 의 47.7 GiB 는 <code>pinned</code> 라 커널이 옮길 수도 내보낼 수도 없어서
+  "느리게라도 도는" 선택지가 아예 없다.
+</div>
+
+<!-- ═══════════════ 9 ═══════════════ -->
+<h2 id="s9"><span class="n">9</span>뒤집힌 것들</h2>
+
+<p>이 측정에서 <strong>가설이나 논리가 실제로 뒤집힌</strong> 아홉 건이다.
+결론만 고치고 지우면 다음 사람이 같은 함정에 빠지므로 남긴다.
+(단순 조작 실수나 환경 사고는 여기 넣지 않았다.)</p>
+
+<div class="tw"><table>
+<caption>표 36 — 철회·정정 목록</caption>
+<thead><tr><th class="n">#</th><th>처음 믿은 것</th><th>실제</th><th>어떻게 드러났나</th></tr></thead>
+<tbody>
+<tr><td class="n">1</td><td>"SSD 페이징은 디스크 경합에 견고하다"</td>
+    <td class="d">근거 없음 — 처치가 무효였다</td>
+    <td>'경합' 이 모델 다운로드였다. 인터넷에 묶인 62 MB/s <b>쓰기</b>로, 폴트가 다투는
+        4 KB 랜덤 읽기 IOPS 를 건드리지 않았다. 진짜 부하로 재자 <b>−25%</b> (§4.1)</td></tr>
+<tr><td class="n">2</td><td>히트율 = 1 − 읽은바이트 ÷ (토큰수 × 2,764)</td>
+    <td class="d">공식이 틀림 — 히트율이 음수가 된다</td>
+    <td>I/O 바이트를 데이터 바이트로 나눴다. 게더는 4 KB 페이지 단위라 100% 미스의 I/O 는
+        2,764 B 가 아니라 65,536 B 다 (§2)</td></tr>
+<tr><td class="n">3</td><td>장치 카운터로 프로세스의 읽기를 잴 수 있다</td>
+    <td class="d">오염된다 — 요청당 3~5 GB 라는 불가능한 값</td>
+    <td>같은 NVMe 에서 다른 모델을 받고 sha256 을 검증하던 프로세스가 84 GB 를 읽고 있었다.
+        <code>/proc/&lt;pid&gt;/io</code> 로 교체 (§2)</td></tr>
+<tr><td class="n">4</td><td>신규 텍스트로 미스율–처리량 회귀를 그린다</td>
+    <td class="d">부분적 오설정 — x 와 y 가 다른 집단</td>
+    <td>폴트의 대부분은 프리필에서 나는데 tok/s 는 디코드만 잰다. 짧은 고정 프롬프트 +
+        매 런 다른 seed 로 프로토콜을 교체 (§3.2)</td></tr>
+<tr><td class="n">5</td><td>남는 18.9 ms 는 양자화와 무관한 고정 오버헤드</td>
+    <td class="d">고정이 아니다 — 타입에 따라 13% 변한다</td>
+    <td>본체 크기를 0.3% 안에 묶고 타입만 바꾼 대조군에서 디코드가 <b>15% 갈렸다</b>.
+        앞선 세 빌드가 우연히 비슷했을 뿐 (§6)</td></tr>
+<tr><td class="n">6</td><td>i-quant 는 언팩이 비싸 K-quant 보다 느리다</td>
+    <td class="d">반대였다</td>
+    <td>IQ3_S/IQ4_NL 조합이 Q3_K/Q4_0 조합보다 디코드·프리필 모두 <b>15% 빨랐다</b> (§6)</td></tr>
+<tr><td class="n">7</td><td>폴트당 비용은 상수다</td>
+    <td class="d">장치에 따라 다르다</td>
+    <td>회귀 절편(HDD 7.70 ms)이 웜 통제군의 <b>측정된 원점</b>과 모순됐다.
+        NVMe 는 밀도와 무관하게 일정(3%), HDD 만 밀도가 높을수록 싸진다(6%) (§4.3, §4.5)</td></tr>
+<tr><td class="n">8</td><td>HDD 는 합성 QD1 벤치(8,780 µs)로 외삽하면 된다</td>
+    <td class="d">18% 비관적이었다</td>
+    <td>실측 폴트 지연은 7,280 µs. 모델의 <b>구조는 맞았고 상수가 틀렸다</b> (§4.1)</td></tr>
+<tr class="hi"><td class="n">9</td><td>"디스크 속도는 별로 중요하지 않다"</td>
+    <td class="d">과잉 일반화 — 임계가 있다</td>
+    <td>디스크가 GPU 연산을 따라잡는 임계는 폴트당 <b>1,289 µs</b>. NVMe 는 그 1/6,
+        HDD 는 5.6배다. 그리고 같은 NVMe 를 경합으로 늦추자 HDD 와 같은 값이 나와,
+        갈리는 것은 <b>장치 종류가 아니라 폴트 지연</b>임이 확인됐다 (§4.2)</td></tr>
+</tbody></table></div>
+
+<div class="note">
+  <b>공통점.</b> 아홉 건 중 여섯 건이 <b>대조군이 없거나 무효해서</b> 생겼다.
+  1번은 처치가 무효했고, 4번은 x 와 y 의 모집단이 달랐고, 5번은 두 변수가 함께 움직였고,
+  7번은 측정된 원점을 무시했다. 이 보고서가 <b>웜(폴트 0) 통제군</b>을 거의 모든 표에
+  끼워 넣는 이유가 이것이다 — 그 열이 평평한지가 매번 설계를 검산한다.
+</div>
+
+<!-- ═══════════════ 10 ═══════════════ -->
+<h2 id="s10"><span class="n">10</span>한계와 남은 것</h2>
+
+<div class="tw"><table>
+<thead><tr><th>항목</th><th>상태</th><th>이유</th></tr></thead>
+<tbody>
+<tr><td>콜드 모델 로딩 시간</td><td>1회만 (89초)</td><td><code>drop_caches</code> 에 root 필요</td></tr>
+<tr><td>전력캡 스윕 (150/180/250 W)</td><td>미측정</td><td><code>nvidia-smi -pl</code> 에 root 필요</td></tr>
+<tr><td>전력캡 스윕</td><td>자연 실험 2점</td><td>180 W 46.77 · 250 W 47.88 tok/s. 캡 변경에 root 필요</td></tr>
+<tr><td>품질 비교 (KLD · top-1)</td><td>미측정</td><td>BF16 참조 360 GB 가 이 박스에 안 들어감</td></tr>
+<tr><td>NVMe 속도캡 (cgroup io.max)</td><td>미측정</td><td>root 필요. 경합 축이 같은 일(폴트 지연 조절)을 이미 함</td></tr>
+<tr><td>미스율–처리량 회귀</td><td>R² = 0.21</td><td>신규 텍스트마다 프리필 조건이 달라 잡음이 큼</td></tr>
+<tr><td>페이지 캐시 정상상태 히트율</td><td>단기 측정만</td><td>36.6 GiB 테이블 · 캐시 ~21 GiB · 장기 운용 미관찰</td></tr>
+</tbody></table></div>
+
+<h3>10.1 남은 것</h3>
+<div class="tw"><table>
+<caption>표 37 — 다음 측정</caption>
+<thead><tr><th>무엇</th><th>왜</th></tr></thead>
+<tbody>
+<tr><td>저미스 구간 (0~35%)</td><td>모델은 35~100% 에서만 검증됐다. 오래 띄운 서버의 실제
+    운용 구간은 그 아래이고, <b>RAM 증설 결정</b>이 거기서 갈린다 — 미스율을 절반으로 낮출 때
+    NVMe 이득은 1.6~6.1%, HDD 는 36~70%</td></tr>
+<tr><td>토큰 시간의 분포 (p99)</td><td>§4.7 의 이봉성. 그리고 16행의 미스가 <b>독립인지 뭉치는지</b>가
+    갈린다 — 뭉치면 그룹 단위 프리페치가 통한다</td></tr>
+<tr><td>동시성 × 미스율</td><td>디코드 큐 깊이가 1.0, 프리필이 1.5 뿐이다(§5.4). 동시 스트림에서
+    깊이가 오르면 <b>바쁜 서버가 토큰당 페이징 비용을 덜 낸다</b></td></tr>
+</tbody></table></div>
+
+<p>또한 모든 값은 <strong>단일 모델 · 단일 빌드 · 단일 장비</strong>에서 나왔다.
+표 9 의 HDD 열은 <strong>측정이 아니라 외삽</strong>이며, 폴트가 직렬이라는 §3.1 의 관찰에
+의존한다. 회전 디스크에서 NCQ 로 겹침이 생기면 실제 값은 표보다 나아질 수 있다.</p>
+
+<footer>
+  측정 <b>2026-09-01</b> · llama.cpp a32af33 (b10717) · CUDA 13.3 · gcc 15.2 · sm_80<br>
+  모델 <b>AtomicChat_Qwen3.8-Flash-Next-AD-M64_IQ4_XS</b> · 샤드 28개 · 84.9 GB · Q5_1 PLE<br>
+  플래그 <b>-ngl 99 -c 32768 -fit off --jinja</b> · <code>--lazy-mode</code> 기본값(auto) · <code>-ot</code> 없음<br>
+  VRAM 44.97 GiB / 64.0 · 호스트 RSS 0.4 → 3.5 GB · 페이지 캐시 ~21 GiB · SSD 쓰기 0
+</footer>
+
+</div>

@@ -3,7 +3,9 @@
 
   safetensors 저장소 → vLLM 용. **저장소 전체**를 받는다 (샤드 + config + 토크나이저).
                        받기 전에 config.json 만 먼저 읽어 MLX·양자화·크기를 판정한다.
-  GGUF 저장소        → llama.cpp 용. 양자화 수준을 골라 파일 1~3개(본체/mmproj/MTP)를 받는다.
+  GGUF 저장소        → llama.cpp 용. **빌드(묶음)** 하나를 골라 받는다. 큰 모델은 한 파일이
+                       아니라 '…-00001-of-00028.gguf' 로 쪼개져 있으므로, 고르는 단위는
+                       파일이 아니라 샤드 묶음이다 (§GGUF 묶음). mmproj/MTP 는 옆에 붙는다.
 
 두 갈래가 다운로드·이어받기·재시도·sha256 검증 인프라를 공유한다. 갈래마다 따로
 구현하면 규칙이 어긋난다 — 아래에 적힌 것과 같은 일이 실제로 벌어졌다.
@@ -213,8 +215,10 @@ class Job:
         self.note = ""
         self.ok = False
         self.err = ""
-        self.speed = 0.0
-        self._last = None             # (시각, 바이트)
+        self.speed = 0.0              # 시작 이후 평균 (아래 tick 참고)
+        self.cur = 0                  # tick 이 갱신하는, 마지막으로 본 크기
+        self.t0 = None                # 이 잡이 실제로 받기 시작한 시각
+        self.b0 = 0                   # 그때의 파일 크기
 
     def current(self):
         try:
@@ -223,16 +227,21 @@ class Job:
             return 0
 
     def tick(self, now):
-        """0.3초 이상 지났으면 속도를 갱신한다(지수 평활)."""
-        cur = self.current()
-        if self._last is None:
-            self._last = (now, cur)
-            return cur
-        dt = now - self._last[0]
-        if dt >= 0.3:
-            inst = max(0, cur - self._last[1]) / dt
-            self.speed = inst if self.speed == 0 else self.speed * 0.7 + inst * 0.3
-            self._last = (now, cur)
+        """속도를 갱신한다 — **시작 이후 평균**이다.
+
+        예전에는 0.3초 창의 순간 속도를 지수 평활(0.7/0.3)해서 썼다. 평활을 해도
+        HF CDN 은 초 단위로 널뛰기 때문에 남은시간 = 남은용량 / 그 값이 매 프레임
+        달라졌다. 85 GB 를 받는 동안 "ETA 37:05 → 2:44:54 → 41:12" 를 보게 되는데,
+        그건 정보가 아니라 소음이다. 누적 평균은 받을수록 안정되고, 어차피 알고
+        싶은 것도 '이 속도가 유지되면 언제 끝나는가' 가 아니라 '지금까지의
+        페이스대로면 언제 끝나는가' 다.
+
+        첫 1초는 0 으로 둔다 — 표본이 너무 작아 엉뚱한 ETA 가 나온다.
+        """
+        cur = self.cur = self.current()
+        if self.t0 is not None:
+            dt = now - self.t0
+            self.speed = max(0, cur - self.b0) / dt if dt >= 1.0 else 0.0
         return cur
 
 
@@ -255,6 +264,9 @@ def _downloader_cmd(url, dest):
 
 def download(job, max_retries=3):
     """한 파일을 받는다. 화면에 직접 찍지 않고 job 의 상태만 바꾼다."""
+    # 평균 속도의 기준점. run_jobs 가 아니라 여기서 잡는다 — max_parallel 때문에
+    # 큐에서 기다린 시간까지 분모에 들어가면 평균이 실제보다 낮게 나온다.
+    job.t0, job.b0 = time.monotonic(), job.current()
     for attempt in range(1, max_retries + 1):
         cmd, _tool = _downloader_cmd(job.url, job.dest)
         if cmd is None:
@@ -287,11 +299,43 @@ def download(job, max_retries=3):
     return False
 
 
-def _render(jobs, width):
+# 잡이 이보다 많으면 전부 그리지 않는다. 샤드 28개짜리 저장소에서 24줄이 '대기' 로
+# 가만히 있는 것은 정보가 아니라 소음이고, 정작 알고 싶은 '전체 몇 %' 는 어디에도 없다.
+COMPACT_AT = 6
+
+
+def _summary(jobs, lw, elapsed, gained):
+    """전체 한 줄. 속도는 잡별 평균의 합이 아니라 **배치 전체의 평균**이다.
+
+    잡별 평균을 더하면 max_parallel 때문에 잡이 교대할 때마다(끝난 것은 빠지고
+    새로 시작한 것은 아직 0) 합이 출렁인다. 받은 총량 ÷ 흐른 시간이 그 문제가 없다.
+    """
+    total = sum(j.total for j in jobs)
+    cur = sum(j.cur for j in jobs)
+    speed = gained / elapsed if elapsed >= 1.0 else 0.0
+    done = sum(1 for j in jobs if j.ok)
+    fail = sum(1 for j in jobs if j.state == "실패")
+    head = f"{'전체':<{lw}}"
+    tail = f"  [{done}/{len(jobs)} 완료{f' · {fail} 실패' if fail else ''}]"
+    if not total:
+        return f"{head} {_fmt_bytes(cur)}  {_fmt_bytes(speed)}/s{tail}"
+    frac = min(1.0, cur / total)
+    filled = int(24 * frac)
+    eta = (total - cur) / speed if speed > 0 else 0
+    return (f"{head} {'█' * filled}{'░' * (24 - filled)} {frac * 100:5.1f}%  "
+            f"{_fmt_bytes(cur)}/{_fmt_bytes(total)}  {_fmt_bytes(speed)}/s  "
+            f"ETA {_fmt_eta(eta)}{tail}")
+
+
+def _render(jobs, width, elapsed=0.0, gained=0):
     # 라벨 폭은 고정 7 이 아니라 실제 라벨에 맞춘다. GGUF 갈래는 'model'/'mmproj'/'mtp'
     # 뿐이라 7 로 충분했지만, safetensors 갈래는 파일명을 그대로 라벨로 쓴다.
     lw = max(7, max(len(j.label) for j in jobs))
     lines = []
+    if len(jobs) > COMPACT_AT:
+        lines.append(_summary(jobs, lw, elapsed, gained))
+        # 진행 중인 것과 실패한 것만 남긴다. 끝난 것과 아직 안 시작한 것은 위 요약이 센다.
+        jobs = [j for j in jobs if j.state == "받는 중" or (j.state == "실패" and not j.ok)]
     for j in jobs:
         head = f"{j.label:<{lw}}"
         if j.state in ("완료", "실패"):
@@ -326,6 +370,8 @@ def run_jobs(jobs, max_parallel=None):
     tty = sys.stdout.isatty()
     drawn = 0
     last_plain = 0.0
+    t_start = time.monotonic()
+    b_start = sum(j.current() for j in jobs)   # 이어받는 중이면 0 이 아니다
 
     workers = min(len(jobs), max_parallel) if max_parallel else len(jobs)
     with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
@@ -335,20 +381,26 @@ def run_jobs(jobs, max_parallel=None):
             now = time.monotonic()
             for j in jobs:
                 j.tick(now)
+            elapsed = now - t_start
+            gained = sum(j.cur for j in jobs) - b_start
             if tty:
                 # 창 크기는 매 프레임 다시 본다. 줄이 터미널 폭을 넘으면 자동 줄바꿈이
                 # 일어나 '올릴 줄 수'가 어긋나므로, 폭보다 한 칸 짧게 잘라서 그린다.
                 width = max(40, shutil.get_terminal_size((100, 24)).columns - 1)
                 # 이미 그린 줄 수만큼 커서를 올리고(ESC[nA) 각 줄을 지운 뒤 다시 쓴다.
                 out = [f"\033[{drawn}A"] if drawn else []
-                lines = _render(jobs, width)
+                lines = _render(jobs, width, elapsed, gained)
                 out += ["\r\033[2K" + ln + "\n" for ln in lines]
+                # 그리는 줄 수는 프레임마다 달라진다 — 압축 표시(COMPACT_AT)에서는 잡이
+                # 끝날 때마다 줄이 사라진다. 줄어든 만큼을 안 지우면 옛 줄이 밑에 남고,
+                # 다음 프레임의 '올릴 줄 수'가 어긋나 화면이 계속 밀린다.
+                out.append("\033[J")
                 sys.stdout.write("".join(out))
                 sys.stdout.flush()
                 drawn = len(lines)
             elif now - last_plain >= 20 or not running:
                 # 로그로 리다이렉트된 경우. 커서 제어는 쓰레기만 남기므로 주기적으로 한 줄씩.
-                for ln in _render(jobs, 200):
+                for ln in _render(jobs, 200, elapsed, gained):
                     print(ln, flush=True)
                 last_plain = now
             if not running:
@@ -530,15 +582,13 @@ def _strip_token(stem, token):
 def suggest_name(model_url):
     """모델 URL → 제안할 디렉터리/파일 이름."""
     stem = re.sub(r"\.gguf$", "", url_basename(model_url), flags=re.IGNORECASE)
+    # 샤드 분할이면 '-00001-of-00028' 이 붙어 있다. 디렉터리 이름에 번호가 들어가면
+    # 안 되므로 여기서 뗀다 (파일 이름 쪽 번호는 GgufSet.dest_names 가 다시 붙인다).
+    stem = re.sub(r"-\d{5}-of-\d{5}$", "", stem)
     if not stem:
         return ""
-    owner = hf_owner_from_url(model_url)
-    if owner:
-        stem = f"{owner}_{_strip_token(stem, owner)}"
-    repo = hf_repo_from_url(model_url)
-    if is_mtp_name(repo) and not is_mtp_name(stem):
-        stem = f"{stem}-MTP"
-    return sanitize_name(stem)
+    return canonical_gguf_dirname(hf_owner_from_url(model_url),
+                                  hf_repo_from_url(model_url), stem)
 
 
 def proj_tag(basename):
@@ -555,7 +605,7 @@ def proj_tag(basename):
 # ─────────────────────────────────────────────────────────────────────────────
 # 대화형 입력 — URL 을 먼저 받고, 이름은 거기서 뽑아 제안한다.
 # ─────────────────────────────────────────────────────────────────────────────
-def ask_names(model_url, proj_url, name_suffix=""):
+def ask_names(model_url, proj_url, name_suffix="", parts=1):
     if not url_basename(model_url).lower().endswith(".gguf"):
         print("⚠ 모델 URL 이 .gguf 로 끝나지 않습니다. 이름이 이상하게 잡힐 수 있습니다.")
     suggested = suggest_name(model_url)
@@ -565,7 +615,10 @@ def ask_names(model_url, proj_url, name_suffix=""):
         print("")
         print("URL 에서 뽑은 이름:")
         print(f"  디렉터리  : models/{suggested}/")
-        print(f"  모델 파일 : {suggested}.gguf")
+        if parts > 1:
+            print(f"  모델 파일 : {suggested}-00001-of-{parts:05d}.gguf … ({parts}개)")
+        else:
+            print(f"  모델 파일 : {suggested}.gguf")
         if proj_url:
             print(f"  프로젝션  : {suggested}_{proj_tag(url_basename(proj_url))}.gguf")
         ans = prompt("이 이름을 쓸까요? (Y/n, 또는 원하는 이름을 직접 입력): ")
@@ -687,9 +740,160 @@ def hf_file_url(owner, repo, revision, path):
 
 
 def quantization_label(path):
-    stem = os.path.basename(path).rsplit(".", 1)[0]
+    # 떼는 것은 **확장자뿐**이다. rsplit(".", 1) 은 마지막 점에서 자르므로
+    # 'Qwen3.8-…-3.84bpw-IQ4_XS-M64' 가 '…-AD-3' 으로 잘려 양자화가 unknown 이 됐다.
+    stem = re.sub(r"\.gguf$", "", os.path.basename(path), flags=re.IGNORECASE)
     found = re.findall(r"(?:^|[-_.])(Q[0-9]+(?:_[0-9A-Za-z]+)*|IQ[0-9]+(?:_[0-9A-Za-z]+)*|BF16|F16|F32)(?:[-_.]|$)", stem, re.IGNORECASE)
     return found[-1].upper() if found else "unknown"
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# GGUF 묶음 — 샤드 분할 저장소
+#
+# 큰 모델은 한 파일이 아니라 '…-00001-of-00028.gguf' 로 쪼개져, 양자화별 하위
+# 디렉터리에 들어 있다. 예전 코드는 .gguf 를 전부 평평하게 늘어놓고 그중 하나만
+# 고르게 했다. AtomicChat/Qwen3.8-Flash-Next-GGUF 에 대고 돌리면 선택지가 94개
+# 나왔고, 무엇을 고르든 85GB 중 조각 하나(첫 샤드는 0.69GB)만 받고 "완료" 라고
+# 말했다. 게다가 그 조각을 '<이름>.gguf' 로 저장했다 — 아래 ⚠ 참고.
+#
+# 그래서 고르는 단위를 파일이 아니라 **묶음**으로 바꾼다.
+#
+# ⚠ 샤드 파일 이름의 '-NNNNN-of-NNNNN.gguf' 는 장식이 아니라 규약이다.
+#   llama.cpp 에는 첫 샤드만 넘기고 나머지는 llama.cpp 가 **이름에서 계산해서**
+#   찾는다(src/llama-model-loader.cpp 의 llama_get_list_splits → llama_split_prefix).
+#   접미사를 떼고 '<이름>.gguf' 로 저장하면 그 함수가 0을 돌려주고
+#   'invalid split file name' 으로 죽는다. 앞부분(prefix)은 우리 규칙대로 바꿔도
+#   되지만 묶음 안에서 전부 같아야 하고, 번호 접미사는 그대로 둬야 한다.
+#
+#   따라서 저장 규칙은:
+#     단일 파일  →  models/<이름>/<이름>.gguf                (예전 그대로)
+#     샤드 분할  →  models/<이름>/<이름>-00001-of-00028.gguf …
+# ─────────────────────────────────────────────────────────────────────────────
+SHARD_RE = re.compile(r"^(?P<stem>.+)-(?P<idx>\d{5})-of-(?P<cnt>\d{5})\.gguf$", re.IGNORECASE)
+
+# 가중치가 아닌 곁다리 .gguf. imatrix 는 양자화에 쓴 중요도 행렬이라 추론에는
+# 쓰이지 않는데, 확장자가 같아서 예전 코드에서는 '본 모델' 목록에 섞여 들어갔다.
+AUX_RE = re.compile(r"(?:^|[-_.])imatrix(?:[-_.]|$)", re.IGNORECASE)
+
+
+def shard_parts(path):
+    """'…-00003-of-00028.gguf' → (stem 경로, 총 개수, 번호). 샤드가 아니면 None."""
+    m = SHARD_RE.match(os.path.basename(path))
+    if not m:
+        return None
+    stem = os.path.join(os.path.dirname(path), m.group("stem"))
+    return stem, int(m.group("cnt")), int(m.group("idx"))
+
+
+class GgufSet:
+    """llama.cpp 가 모델 하나로 여기는 단위. 단일 파일이면 paths 가 1개다.
+
+    name    : 샤드 접미사와 확장자를 뗀 이름 (하위 디렉터리 이름과 보통 같다)
+    paths   : 저장소 안의 경로, 샤드 번호 순
+    declared: 파일 이름이 주장하는 총 샤드 수 ('of-00028' 의 28)
+    missing : 저장소에 없는 샤드 번호. 비어 있지 않으면 받아도 안 뜬다
+    """
+
+    def __init__(self, name, paths, sizes, declared, missing=()):
+        self.name = name
+        self.paths = paths
+        self.size = sum(sizes)
+        self.declared = declared
+        self.missing = list(missing)
+        base = os.path.basename(name)
+        self.is_proj = "mmproj" in base.lower()
+        self.is_mtp = is_mtp_name(base) and not self.is_proj
+        self.is_aux = bool(AUX_RE.search(base))
+
+    @property
+    def sharded(self):
+        return self.declared > 1
+
+    def dest_names(self, stem):
+        """저장할 파일 이름. 샤드면 번호 접미사를 그대로 살린다(위 ⚠)."""
+        if not self.sharded:
+            return [f"{stem}.gguf"]
+        out = []
+        for path in self.paths:
+            _s, cnt, idx = shard_parts(path)
+            out.append(f"{stem}-{idx:05d}-of-{cnt:05d}.gguf")
+        return out
+
+    def describe(self):
+        quant = quantization_label(self.paths[0])
+        if self.sharded:
+            what = f"샤드 {len(self.paths)}/{self.declared}개 · {_fmt_bytes(self.size)}"
+        else:
+            what = _fmt_bytes(self.size)
+        line = f"{os.path.basename(self.name)}  [{quant}]  {what}"
+        return line + ("  ⚠ 샤드 누락" if self.missing else "")
+
+
+def group_gguf(files, meta):
+    """저장소의 .gguf 목록 → GgufSet 목록. 샤드는 하나로 묶인다."""
+    groups, singles = {}, []
+    for path in files:
+        parts = shard_parts(path)
+        if parts:
+            stem, cnt, idx = parts
+            groups.setdefault((stem, cnt), {})[idx] = path
+        else:
+            singles.append(path)
+
+    out = []
+    for (stem, cnt), found in groups.items():
+        paths = [found[i] for i in sorted(found)]
+        missing = [i for i in range(1, cnt + 1) if i not in found]
+        out.append(GgufSet(stem, paths, [meta.get(p, (0, ""))[0] for p in paths], cnt, missing))
+    for path in singles:
+        stem = re.sub(r"\.gguf$", "", path, flags=re.IGNORECASE)
+        out.append(GgufSet(stem, [path], [meta.get(path, (0, ""))[0]], 1))
+    return sorted(out, key=lambda s: s.name.lower())
+
+
+def choose_set(label, sets):
+    print(f"\n{label} 선택:")
+    for index, s in enumerate(sets, 1):
+        print(f"  [{index}] {s.describe()}")
+    while True:
+        answer = prompt("번호 선택 [기본값 1]: ") or "1"
+        if answer.isdigit() and 1 <= int(answer) <= len(sets):
+            return sets[int(answer) - 1]
+        print("올바른 번호를 선택하세요.")
+
+
+def require_complete(s):
+    """저장소에 샤드가 다 있는지. 없으면 85GB 를 태우기 전에 여기서 멈춘다."""
+    if not s.missing:
+        return
+    shown = ", ".join(f"{i:05d}" for i in s.missing[:5])
+    print("", file=sys.stderr)
+    print(f"'{os.path.basename(s.name)}' 은 샤드 {s.declared}개를 주장하는데 "
+          f"저장소에 {len(s.missing)}개가 없습니다: {shown}"
+          f"{' …' if len(s.missing) > 5 else ''}", file=sys.stderr)
+    print("아직 업로드 중이거나 저장소가 깨진 것입니다. 다 받아도 llama.cpp 가 "
+          "'invalid split count' 로 거부합니다.", file=sys.stderr)
+    sys.exit(1)
+
+
+def check_free_space(target_dir, need):
+    """받을 바이트가 남은 공간에 들어가는지. 85GB 를 반쯤 받고 ENOSPC 로 죽는 것을 막는다."""
+    if need <= 0:
+        return
+    probe = target_dir
+    while probe and not os.path.isdir(probe):
+        probe = os.path.dirname(probe)
+    try:
+        free = shutil.disk_usage(probe or ".").free
+    except OSError:
+        return
+    print(f"  필요 {_fmt_bytes(need)} · 남은 공간 {_fmt_bytes(free)}")
+    if free >= need * 1.02:
+        return
+    print(f"  ⚠ 공간이 모자랍니다.")
+    if not (prompt("          그래도 진행할까요? (y/N): ") or "N").lower().startswith("y"):
+        print("중단했습니다.", file=sys.stderr)
+        sys.exit(1)
 
 
 def choose_file(label, files):
@@ -1352,7 +1556,13 @@ TRAIT_RULES = [
 _NAME_NOISE = re.compile(
     r"(?i)(?:^|[-_.])(?:"
     r"awq|gptq|nvfp4|mxfp4|fp4|fp8|w4a16|w4a4|w8a8|w8a16|w16a16|int4|int8|"
-    r"4bit|8bit|q4_0|q4_k_m|q8_0|bnb|autoround|quantized|compressed[-_]?tensors|"
+    r"4bit|8bit|bnb|autoround|quantized|compressed[-_]?tensors|"
+    # GGUF 양자화 토큰 전부 (q4_0 · q4_k_m · q8_k_p · iq4_xs · iq2_s …) 와 bpw 표기.
+    # 예전에는 q4_0/q4_k_m/q8_0 세 개만 박아 뒀는데, 그 셋은 safetensors 저장소 이름에
+    # 우연히 섞여 들어온 것들이었다. GGUF 갈래가 이 규칙을 쓰기 시작하면 나머지가 전부
+    # 베이스 모델명에 남는다 — 'Qwen3.8-27B-Aggressive-Q8_K_P' 처럼.
+    # bpw 도 노이즈로 본다: 양자화 축을 비트수로 한 번 더 말한 것뿐이다.
+    r"i?q\d+[a-z0-9_]*|\d+(?:\.\d+)?bpw|i1|"
     r"abliterated|uncensored|heretic|obliterated|ablated|decensored|unaligned|"
     r"unfiltered|mtp|qat|dflash|freetoken|vision|it|ct|instruct|chat|hf|"
     r"nvfp4a16|fp4a16|int8a16|smoothquant|imatrix|ptq|autoround|huihui|"
@@ -1474,6 +1684,32 @@ def canonical_dirname(owner, repo, qc, config):
         parts.append("-".join(traits))
     parts.append(f"{w}-{a}")
     return sanitize_name("_".join(parts))
+
+
+def canonical_gguf_dirname(owner, repo, stem):
+    """GGUF 판 표준 이름 —  <제작자>_<베이스>_<특성>_<양자화>
+
+    safetensors 갈래의 canonical_dirname 과 **같은 축**을 쓴다. 두 갈래가 models/ 아래
+    나란히 앉는데 이름 규칙이 다르면 목록이 읽히지 않는다. 다만 W-A 두 축 대신 한 축이다:
+    GGUF 는 가중치만 양자화하고 연산은 F16 이라 A 축이 늘 같아서 정보가 없다.
+
+    특성은 파일명뿐 아니라 **저장소 이름에서도** 찾는다. 'orcarouter/…-Uncensored-GGUF'
+    처럼 저장소 이름에만 붙어 있고 파일명에는 없는 경우가 흔하다.
+    """
+    quant = quantization_label(stem)
+    if quant == "unknown":
+        # 표준 표기가 아니면(실측: cygnal 의 'IQ4XS-NGQ4') 노이즈 제거를 건너뛴다.
+        # 무엇이 양자화 토큰인지 모르는 채로 깎으면 서로 다른 빌드가 같은 이름이 된다.
+        base, quant = _strip_token(stem, owner), ""
+    else:
+        base = base_model_name(owner, stem)
+    parts = ([sanitize_name(owner)] if owner else []) + [base]
+    traits = model_traits(owner, f"{repo}-{stem}")
+    if traits:
+        parts.append("-".join(traits))
+    if quant:
+        parts.append(quant)
+    return sanitize_name("_".join(p for p in parts if p))
 
 
 def suggest_repo_dirname(owner, repo):
@@ -1651,61 +1887,80 @@ def main_safetensors(owner, repo, revision, files, meta):
 
 
 def main_gguf(owner, repo, revision, files, meta):
-    """GGUF 저장소 (llama.cpp 용). 예전부터의 갈래 — 동작은 그대로다."""
+    """GGUF 저장소 (llama.cpp 용). 고르는 단위는 파일이 아니라 묶음이다(§GGUF 묶음)."""
     gguf_files = sorted(f for f in files if f.lower().endswith(".gguf"))
     if not gguf_files:
         print("No GGUF files found in the repository.", file=sys.stderr)
         sys.exit(1)
 
-    model_files = [f for f in gguf_files if "mmproj" not in os.path.basename(f).lower()
-                   and not is_mtp_name(f)]
-    projection_files = [f for f in gguf_files if "mmproj" in os.path.basename(f).lower()]
-    mtp_files = [f for f in gguf_files if is_mtp_name(f)]
-    if not model_files and mtp_files:
-        # 'Something-MTP.gguf' 처럼 본 모델 파일 이름 자체가 MTP 로 끝나는 저장소도
-        # 있을 수 있다. 그런 곳에서 본 모델 목록이 통째로 비어 버리지 않게 되돌린다.
-        model_files, mtp_files = mtp_files, []
-    if not model_files:
+    sets = group_gguf(gguf_files, meta)
+    model_sets = [s for s in sets if not (s.is_proj or s.is_mtp or s.is_aux)]
+    proj_sets = [s for s in sets if s.is_proj]
+    mtp_sets = [s for s in sets if s.is_mtp]
+    aux_sets = [s for s in sets if s.is_aux]
+    if not model_sets and mtp_sets:
+        # 'Something-MTP.gguf' 처럼 본 모델 이름 자체가 MTP 로 끝나는 저장소도 있다.
+        # 그런 곳에서 본 모델 목록이 통째로 비어 버리지 않게 되돌린다.
+        model_sets, mtp_sets = mtp_sets, []
+    if not model_sets:
         print("No base model GGUF files found.", file=sys.stderr)
         sys.exit(1)
 
     print(f"\n저장소: {owner}/{repo} (revision: {revision})")
-    print("사용 가능한 양자화 수준:")
-    for path in model_files:
-        print(f"  - {quantization_label(path)}: {os.path.basename(path)}")
-    model_file = choose_file("본 모델", model_files)
-    model_url = hf_file_url(owner, repo, revision, model_file)
+    print("사용 가능한 빌드:")
+    for s in model_sets:
+        print(f"  - {s.describe()}")
+    if aux_sets:
+        print(f"  (곁다리 {len(aux_sets)}개 제외: "
+              f"{', '.join(os.path.basename(s.name) for s in aux_sets[:3])})")
+    model_set = choose_set("본 모델", model_sets)
+    require_complete(model_set)
 
-    proj_file = ""
-    if projection_files:
-        use_proj = (prompt("프로젝션 모델을 사용할까요? (Y/n): ") or "Y").lower().startswith("y")
-        if use_proj:
-            proj_file = choose_file("프로젝션 모델", projection_files)
-    mtp_file = ""
-    if mtp_files:
-        use_mtp = (prompt("MTP 모델을 사용할까요? (y/N): ") or "N").lower().startswith("y")
-        if use_mtp:
-            mtp_file = choose_file("MTP 모델", mtp_files)
+    proj_set = None
+    if proj_sets:
+        if (prompt("프로젝션 모델을 사용할까요? (Y/n): ") or "Y").lower().startswith("y"):
+            proj_set = choose_set("프로젝션 모델", proj_sets)
+    mtp_set = None
+    if mtp_sets:
+        if (prompt("MTP 모델을 사용할까요? (y/N): ") or "N").lower().startswith("y"):
+            mtp_set = choose_set("MTP 모델", mtp_sets)
 
-    proj_url = hf_file_url(owner, repo, revision, proj_file) if proj_file else ""
-    mtp_url = hf_file_url(owner, repo, revision, mtp_file) if mtp_file else ""
-    ensure_token(model_url)
+    url_of = lambda path: hf_file_url(owner, repo, revision, path)
+    ensure_token(url_of(model_set.paths[0]))
 
-    model_dir_name = ask_names(model_url, proj_url, "-MTP" if mtp_file else "")
+    model_dir_name = ask_names(url_of(model_set.paths[0]),
+                               url_of(proj_set.paths[0]) if proj_set else "",
+                               "-MTP" if mtp_set else "",
+                               parts=len(model_set.paths))
     target_dir = os.path.join("models", model_dir_name)
     os.makedirs(target_dir, exist_ok=True)
 
-    plans = [("model", model_file, model_url,
-              os.path.join(target_dir, f"{model_dir_name}.gguf"))]
-    if proj_url:
-        plans.append(("mmproj", proj_file, proj_url, os.path.join(
-            target_dir, f"{model_dir_name}_{proj_tag(url_basename(proj_url))}.gguf")))
-    if mtp_url:
-        plans.append(("mtp", mtp_file, mtp_url,
-                      os.path.join(target_dir, f"{model_dir_name}_mtp.gguf")))
+    # ─── 무엇을 어디에 ───
+    plans = []          # (라벨, 저장소 경로, URL, 목적지)
+    dests = model_set.dest_names(model_dir_name)
+    for i, (path, name) in enumerate(zip(model_set.paths, dests), 1):
+        label = f"model {i:02d}/{len(dests)}" if model_set.sharded else "model"
+        plans.append((label, path, url_of(path), os.path.join(target_dir, name)))
+    for side, stem in ((proj_set, None), (mtp_set, f"{model_dir_name}_mtp")):
+        if not side:
+            continue
+        if stem is None:
+            stem = f"{model_dir_name}_{proj_tag(os.path.basename(side.paths[0]))}"
+        tag = "mmproj" if side.is_proj else "mtp"
+        names = side.dest_names(stem)
+        for i, (path, name) in enumerate(zip(side.paths, names), 1):
+            label = f"{tag} {i:02d}/{len(names)}" if side.sharded else tag
+            plans.append((label, path, url_of(path), os.path.join(target_dir, name)))
+
+    # 저장소 문서. 권장 샘플링·라이선스·저자의 주의사항이 여기 있고, 몇 달 뒤
+    # models/ 를 열었을 때 이게 무슨 빌드였는지 알려주는 유일한 물건이다.
+    for doc in files:
+        if os.path.basename(doc).lower() in ("readme.md", "license", "license.txt", "license.md"):
+            plans.append(("doc", doc, url_of(doc),
+                          os.path.join(target_dir, os.path.basename(doc))))
 
     print("")
-    print("── 받을 파일 ──")
+    print(f"── 받을 파일 ({len(plans)}개) ──")
     jobs, skipped = [], []
     for label, path, url, dest in plans:
         total, sha = meta.get(path, (0, ""))
@@ -1716,9 +1971,11 @@ def main_gguf(owner, repo, revision, files, meta):
             skipped.append((label, dest, sha))
 
     if jobs:
+        check_free_space(target_dir, sum(j.total - j.resumed for j in jobs))
         print("")
-        ok = run_jobs(jobs)
-        if not ok:
+        # 4개씩. 샤드가 28개인 저장소에서 연결만 28개로 쪼개면 대역폭은 그대로인데
+        # 개별 파일이 전부 느려져서, 하나가 끝나 검증을 시작할 수 있는 시점만 늦어진다.
+        if not run_jobs(jobs, max_parallel=4):
             print("", file=sys.stderr)
             print("일부 다운로드가 실패했습니다. 다시 실행하면 받다 만 지점부터 이어받습니다.",
                   file=sys.stderr)
@@ -1739,11 +1996,12 @@ def main_gguf(owner, repo, revision, files, meta):
         print(f"(건너뛴 파일 {len(skipped)}개는 크기만 확인했습니다. "
               f"sha256 까지 보려면 VERIFY_ALL=1 로 실행하세요.)")
 
-    if to_verify:
+    hashable = [t for t in to_verify if t[2]]
+    if hashable:
         print("")
         print("── 무결성 검증 ──")
         bad = False
-        for _label, dest, sha in to_verify:
+        for _label, dest, sha in hashable:
             if not verify_sha(dest, sha):
                 bad = True
         if bad:
@@ -1753,12 +2011,27 @@ def main_gguf(owner, repo, revision, files, meta):
                   file=sys.stderr)
             sys.exit(1)
 
+    # ─── 받은 것 확인 ───
+    entry = os.path.join(target_dir, dests[0])
+    missing = [n for n in dests if not os.path.isfile(os.path.join(target_dir, n))]
+    if missing:
+        print("", file=sys.stderr)
+        print(f"샤드 {len(missing)}개가 없습니다: {', '.join(missing[:3])}"
+              f"{' …' if len(missing) > 3 else ''}", file=sys.stderr)
+        sys.exit(1)
+
     print("")
     print("Downloads complete. Saved to:")
     # ls 는 fd 1 에 직접 쓴다 — 파이썬 버퍼를 우회하므로, 먼저 비워두지 않으면
     # 로그로 리다이렉트했을 때 ls 결과가 앞선 출력보다 먼저 나와 순서가 뒤집힌다.
     sys.stdout.flush()
     subprocess.call(["ls", "-1sh", target_dir])
+
+    if model_set.sharded:
+        print("")
+        print(f"샤드 {len(dests)}개짜리 모델입니다. llama.cpp 에는 **첫 샤드만** 넘깁니다 —")
+        print("나머지는 파일 이름에서 스스로 찾습니다. 이름을 바꾸면 못 찾습니다.")
+        print(f"  -m {entry}")
 
 
 def main():

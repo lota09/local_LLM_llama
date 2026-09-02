@@ -280,8 +280,22 @@ select CHOSEN_DIR in "${options[@]}"; do
   fi
 done
 
+# ── 디스크 페이징 모드 검증 (LAZY_MODE=auto|on|off) ─────────────────────────
+# 값 검사는 여기서 한다 — 2분짜리 로딩을 태운 뒤에 "잘못된 값" 을 보면 안 된다.
+LAZY_MODE="${LAZY_MODE:-auto}"
+case "$LAZY_MODE" in
+  auto|on|off) : ;;
+  *) echo "⛔ LAZY_MODE 는 auto|on|off 중 하나여야 합니다 (받은 값: $LAZY_MODE)"; exit 1 ;;
+esac
+if [ "$LAZY_MODE" = "off" ]; then
+  echo "⚠ LAZY_MODE=off — 페이징 대상 텐서를 통째로 메모리에 올립니다."
+  echo "  큰 색인 텐서가 있는 모델(예: Qwen3.8-Flash-Next 의 36 GiB n-gram 테이블)에서는"
+  echo "  RAM 이 부족해 죽습니다. 이 박스(RAM 30 GiB)에서는 실측으로 죽었습니다."
+  read -p "  그래도 진행할까요? (y/N): " _lz; [[ "${_lz:-N}" =~ ^[Yy]$ ]] || exit 1
+fi
+
 # Auto-detect mmproj and model inside the chosen directory
-mapfile -t ALL_GGUF < <(find "$TARGET_DIR" -maxdepth 1 -type f -iname "*.gguf" | sort)
+mapfile -t ALL_GGUF < <(find "$TARGET_DIR" -maxdepth 1 \( -type f -o -type l \) -iname "*.gguf" | sort)
 if [ ${#ALL_GGUF[@]} -eq 0 ]; then
   echo "No .gguf files found in $TARGET_DIR.";
   read -p "Would you like to provide absolute paths for model and (optional) mmproj? (y/N): " provide
@@ -317,7 +331,47 @@ else
       model_tmp+=("$f")
     fi
   done
-  mapfile -t MODEL_CANDS < <(printf '%s\n' "${model_tmp[@]}" )
+  mapfile -t MODEL_CANDS < <(printf '%s\n' "${model_tmp[@]}" | grep -v '^$' || true)
+
+  # ── 샤드 분할 GGUF 접기 ────────────────────────────────────────────────────
+  # 큰 모델은 '…-00001-of-00033.gguf' 로 쪼개져 있다. 접지 않으면 select 메뉴에
+  # 33줄이 뜨고, 무엇을 고르든 조각 하나가 -m 으로 넘어가 llama.cpp 가
+  # 'invalid split file name' 으로 죽는다. llama.cpp 에는 **첫 샤드만** 주면
+  # 나머지는 이름에서 계산해 찾는다(llama_split_prefix).
+  # 접두사(-NNNNN-of-NNNNN 를 뗀 것)로 묶고, 묶음당 첫 샤드 하나만 남긴다.
+  declare -A _shard_first _shard_n _shard_want _shard_bytes
+  folded=()
+  for f in "${MODEL_CANDS[@]}"; do
+    b="$(basename "$f")"
+    if [[ "$b" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]]; then
+      key="$(dirname "$f")/${BASH_REMATCH[1]}"
+      idx=$((10#${BASH_REMATCH[2]})); want=$((10#${BASH_REMATCH[3]}))
+      _shard_n["$key"]=$(( ${_shard_n["$key"]:-0} + 1 ))
+      _shard_want["$key"]=$want
+      _shard_bytes["$key"]=$(( ${_shard_bytes["$key"]:-0} + $(stat -Lc%s "$f" 2>/dev/null || echo 0) ))
+      if [ "$idx" -eq 1 ]; then _shard_first["$key"]="$f"; folded+=("$f"); fi
+    else
+      folded+=("$f")
+    fi
+  done
+  # 첫 샤드가 없는 묶음(00001 누락)은 위 루프에서 후보가 안 잡히므로 여기서 알린다
+  for key in "${!_shard_n[@]}"; do
+    if [ -z "${_shard_first[$key]:-}" ]; then
+      echo "⚠ $(basename "$key"): 첫 샤드(-00001-of-*)가 없습니다. 이 묶음은 띄울 수 없습니다."
+    fi
+  done
+  mapfile -t MODEL_CANDS < <(printf '%s\n' "${folded[@]}" | grep -v '^$' || true)
+
+  # 묶음 요약을 한 줄씩 보여 준다 (메뉴에서 무엇을 고르는지 알 수 있게)
+  for key in "${!_shard_n[@]}"; do
+    have=${_shard_n[$key]}; want=${_shard_want[$key]}
+    gb=$(awk -v b="${_shard_bytes[$key]:-0}" 'BEGIN{printf "%.1f", b/1073741824}')
+    if [ "$have" -eq "$want" ]; then
+      echo "샤드 묶음: $(basename "$key") — ${have}/${want}개 · ${gb} GiB"
+    else
+      echo "⚠ 샤드 묶음: $(basename "$key") — ${have}/${want}개 · ${gb} GiB  ($((want-have))개 없음 — 띄우면 'invalid split count' 로 죽습니다)"
+    fi
+  done
 
   # choose projection if present
   if [ ${#PROJ_CANDS[@]} -gt 0 ]; then
@@ -358,6 +412,33 @@ else
   fi
 fi
 
+# ── 샤드 완결성 검사 ──────────────────────────────────────────────────────────
+# 여기서 막지 않으면 100초짜리 로딩을 태운 뒤에야 'invalid split count' 를 본다.
+# llama.cpp 는 첫 샤드 이름에서 나머지 경로를 계산하므로, 이름이 하나라도
+# 어긋나거나 빠지면 못 찾는다.
+check_shards() {
+  local first="$1" base dir stem want i path missing=0
+  base="$(basename "$first")"
+  [[ "$base" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]] || return 0   # 단일 파일
+  dir="$(dirname "$first")"; stem="${BASH_REMATCH[1]}"; want=$((10#${BASH_REMATCH[3]}))
+  if [ "$((10#${BASH_REMATCH[2]}))" -ne 1 ]; then
+    echo "⛔ 샤드 모델은 **첫 샤드**를 지정해야 합니다: ${stem}-00001-of-$(printf '%05d' "$want").gguf"
+    return 1
+  fi
+  for ((i=1;i<=want;i++)); do
+    path="$dir/${stem}-$(printf '%05d' "$i")-of-$(printf '%05d' "$want").gguf"
+    [ -f "$path" ] || { echo "   없음: $(basename "$path")"; missing=$((missing+1)); }
+    [ "$missing" -ge 5 ] && { echo "   … (이하 생략)"; break; }
+  done
+  if [ "$missing" -gt 0 ]; then
+    echo "⛔ 샤드가 빠졌습니다. 다 받고 다시 실행하세요 (download_model.sh 가 이어받습니다)."
+    return 1
+  fi
+  echo "샤드 ${want}개 모두 확인 — llama.cpp 에는 첫 샤드만 넘깁니다."
+  return 0
+}
+check_shards "$MODEL_PATH" || exit 1
+
 # Confirm auto-detected paths with user
 echo "Detected paths: model=$MODEL_PATH proj=${PROJ_PATH:-<none>}"
 read -p "Confirm and continue? (Y/n): " confirm
@@ -382,7 +463,7 @@ fi
 # Only search for projection files in the chosen target directory when needed
 if [[ "$IS_VISION" =~ ^[Yy]$ ]] && [ -z "${PROJ_PATH:-}" ]; then
   echo "Searching for projection files (mmproj-*.gguf) in '$TARGET_DIR'..."
-  mapfile -t PROJ_FILES < <(find "$TARGET_DIR" -maxdepth 1 -type f -iname "*mmproj-*.gguf" | sort)
+  mapfile -t PROJ_FILES < <(find "$TARGET_DIR" -maxdepth 1 \( -type f -o -type l \) -iname "*mmproj-*.gguf" | sort)
   if [ ${#PROJ_FILES[@]} -eq 0 ]; then
     echo "No mmproj-*.gguf files found in $TARGET_DIR. You can add one or skip.";
     read -p "Proceed without projection file? (y/N): " SKIP_PROJ
@@ -487,10 +568,21 @@ mkdir -p "$(dirname "$LOG_FILE")"
 model_bytes=0
 proj_bytes=0
 if [ -f "$MODEL_PATH" ]; then
-  model_bytes=$(stat -c%s "$MODEL_PATH" 2>/dev/null || stat -f%z "$MODEL_PATH" 2>/dev/null || echo 0)
+  # 샤드 분할이면 **묶음 전체**를 더한다. 첫 샤드만 재면 88 GB 모델이 662 MB 로 찍히고,
+  # 그 값으로 컨텍스트를 추정하는 2·3순위 경로가 VRAM 을 크게 과대평가한다.
+  _mb="$(basename "$MODEL_PATH")"
+  if [[ "$_mb" =~ ^(.+)-([0-9]{5})-of-([0-9]{5})\.gguf$ ]]; then
+    model_bytes=0
+    for _sh in "$(dirname "$MODEL_PATH")/${BASH_REMATCH[1]}"-[0-9][0-9][0-9][0-9][0-9]-of-*.gguf; do
+      [ -e "$_sh" ] || continue
+      model_bytes=$(( model_bytes + $(stat -Lc%s "$_sh" 2>/dev/null || echo 0) ))
+    done
+  else
+    model_bytes=$(stat -Lc%s "$MODEL_PATH" 2>/dev/null || stat -f%z "$MODEL_PATH" 2>/dev/null || echo 0)
+  fi
 fi
 if [ -n "$PROJ_PATH" ] && [ -f "$PROJ_PATH" ]; then
-  proj_bytes=$(stat -c%s "$PROJ_PATH" 2>/dev/null || stat -f%z "$PROJ_PATH" 2>/dev/null || echo 0)
+  proj_bytes=$(stat -Lc%s "$PROJ_PATH" 2>/dev/null || stat -f%z "$PROJ_PATH" 2>/dev/null || echo 0)
 fi
 
 # MTP 사이드카도 VRAM 을 먹는다(903MB 짜리도 있다). 1순위 -fit 경로는 드래프트를
@@ -888,12 +980,43 @@ fi
 ARGS+=( --port "$SERVER_PORT" --host 127.0.0.1 -ngl 99 "${C_ARGS[@]}" --parallel "$N_PARALLEL" -fa on -ctk "$KV_TYPE" -ctv "$KV_TYPE" --reasoning on --tools all --ui-mcp-proxy)
 ARGS+=( --repeat-penalty 1.1 --presence-penalty 0.1 --frequency-penalty 0.1 --repeat-last-n 256 )
 
+# ── 디스크 페이징 모드 (LAZY_MODE=auto|on|off) ──────────────────────────────
+# llama.cpp 는 세 조건이 **모두** 맞을 때만 텐서를 파일에 남긴다:
+#   ① 아키텍처가 그 텐서에 TENSOR_READ_LAZY 를 달았다 (qwen4exp 의 n-gram 테이블,
+#      gemma3n/gemma4 의 per-layer 임베딩 등. 전부 GET_ROWS 색인 텐서다)
+#   ② auto 면 그 텐서가 4 GiB 를 넘는다 (on 이면 크기 무시)
+#   ③ mmap 을 쓸 수 있다
+# 화이트리스트 방식이라 일반 dense 모델에서는 아무 일도 일어나지 않는다.
+# 끄고 싶으면 LAZY_MODE=off — 단, 대상 텐서가 크면 그만큼 RAM/VRAM 을 더 쓴다.
+case "$LAZY_MODE" in
+  auto) : ;;   # llama.cpp 기본값 — 플래그를 넘기지 않는다
+  on|off) ARGS+=( -lzm "$LAZY_MODE" ) ;;
+esac
+
+# ── 디스크 페이징 금지 플래그 가드 ──────────────────────────────────────────
+# 일부 아키텍처(qwen4exp 의 n-gram 테이블 등)는 36 GiB 짜리 텐서를 **파일에 둔 채**
+# 필요한 4 KB 행만 읽어 쓴다(llama.cpp 의 --lazy-mode, 기본값 auto).
+# 아래 플래그들은 그 텐서를 통째로 메모리로 끌어올리므로, 30 GiB RAM 에서는 즉사한다.
+# 이 스크립트가 직접 넣지는 않지만 EXTRA_ARGS 등으로 새어 들어올 수 있어 막는다.
+for _bad in "${ARGS[@]}"; do
+  case "$_bad" in
+    --no-mmap|--mlock)
+      echo "⛔ $_bad 는 쓸 수 없습니다 — 디스크 페이징이 죽고 큰 텐서를 RAM 으로 끌어올립니다."; exit 1 ;;
+    --load-mode)
+      echo "⛔ --load-mode 를 직접 지정하지 마세요 — mmap 이 아니면 페이징이 죽습니다."; exit 1 ;;
+  esac
+done
+
 # [FIX] LD_LIBRARY_PATH는 여기, llama-server 프로세스 하나에만 적용한다(전역 export 아님).
 LD_LIBRARY_PATH="${LLAMA_LD_LIBRARY_PATH}:${LD_LIBRARY_PATH:-}" \
   nohup "$SERVER_BIN" "${ARGS[@]}" > "$LOG_FILE" 2>&1 &
 SERVER_PID=$!
 
 echo "Llama-server started (PID $SERVER_PID) on port ${SERVER_PORT}"
+
+# 디스크 페이징이 실제로 걸렸는지는 로그가 알려준다. 준비 완료 후 §아래에서 확인한다.
+# (여기서 바로 보면 아직 안 찍혔을 수 있어 플래그만 세워 둔다.)
+LAZY_EXPECTED=1
 echo ""
 
 # 서버가 준비/실패할 때까지 대기.
@@ -954,6 +1077,30 @@ echo ""
 
 if [ "$READY" -eq 1 ]; then
   echo "Server ready at http://127.0.0.1:${SERVER_PORT}  (PID $SERVER_PID)"
+
+  # ── 디스크 페이징이 걸렸는지 ─────────────────────────────────────────────
+  # 로그의 'lazy read enabled' 줄은 기본 상세도에서 안 찍히므로 그것에 의존하지 않는다.
+  # 대신 **파일 크기와 VRAM 사용량의 차이**로 본다: 가중치를 다 올렸다면 둘이 비슷하고,
+  # 큰 텐서를 파일에 남겼다면 그만큼 벌어진다.
+  _vram_mib=$(nvidia-smi --query-gpu=memory.used --format=csv,noheader,nounits 2>/dev/null | head -1)
+  if [ -n "${_vram_mib:-}" ] && [ "$model_mb" -gt 0 ]; then
+    _gap=$(( model_mb - _vram_mib ))
+    printf '모델 파일     : %.1f GiB   ·   VRAM 사용 %.1f GiB\n' \
+      "$(awk -v m="$model_mb" 'BEGIN{print m/1024}')" \
+      "$(awk -v m="$_vram_mib" 'BEGIN{print m/1024}')"
+    echo "페이징 모드   : --lazy-mode ${LAZY_MODE}  (LAZY_MODE 환경변수로 변경)"
+    if [ "$_gap" -gt 4096 ]; then
+      printf '디스크 페이징 : ● 차이 %.1f GiB 가 파일에 남아 필요한 행만 읽힙니다 (--lazy-mode auto)\n' \
+        "$(awk -v g="$_gap" 'BEGIN{print g/1024}')"
+      echo "                이 텐서들은 VRAM·RAM 을 쓰지 않습니다. 남는 RAM 이 자동으로 캐시가 됩니다."
+    else
+      echo "디스크 페이징 : ○ 가중치가 모두 적재됐습니다 (페이징 대상 텐서가 없는 모델이면 정상)"
+    fi
+  fi
+  if rss_kb=$(awk '/^VmRSS:/{print $2}' "/proc/$SERVER_PID/status" 2>/dev/null); then
+    printf '호스트 RSS    : %.1f GB   (페이지 캐시는 별도이며 메모리 압박 시 그냥 버려집니다)\n' \
+      "$(awk -v k="$rss_kb" 'BEGIN{print k/1048576}')"
+  fi
 elif kill -0 "$SERVER_PID" 2>/dev/null && [ "$WAITED" -ge "$MAX_WAIT" ]; then
   echo "Timeout(${MAX_WAIT}s): 아직 준비되지 않았지만 서버는 계속 로딩 중일 수 있습니다."
   echo "  상태 확인: curl $HEALTH_URL   (준비되면 {\"status\":\"ok\"})"

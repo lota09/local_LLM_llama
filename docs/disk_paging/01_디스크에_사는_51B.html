@@ -1,0 +1,720 @@
+<title>디스크에 사는 51B</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Gothic+A1:wght@700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans+KR:wght@400;500;600&display=swap">
+
+<style>
+  :root {
+    --ground:   #eef1f4;
+    --surface:  #ffffff;
+    --sunken:   #e3e8ed;
+    --ink:      #161b22;
+    --ink-2:    #59636f;
+    --ink-3:    #8c96a2;
+    --line:     #d3dae1;
+    --line-2:   #bcc5ce;
+    --accent:   #a8531b;
+    --accent-b: #f3e5d6;
+    --ok:       #216f60;
+    --no:       #a03b38;
+    --shadow:   0 1px 2px rgba(22,27,34,.05), 0 8px 24px -12px rgba(22,27,34,.18);
+
+    --f-disp: "Gothic A1", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    --f-body: "IBM Plex Sans KR", "Apple SD Gothic Neo", "Malgun Gothic", sans-serif;
+    --f-mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Menlo, monospace;
+
+    color-scheme: light;
+  }
+
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --ground:   #13161b;
+      --surface:  #1a1e25;
+      --sunken:   #22272f;
+      --ink:      #e7ebf0;
+      --ink-2:    #9aa5b1;
+      --ink-3:    #6d7885;
+      --line:     #2b323b;
+      --line-2:   #3b434e;
+      --accent:   #e0924e;
+      --accent-b: #33281d;
+      --ok:       #4fb39c;
+      --no:       #d8746e;
+      --shadow:   0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+      color-scheme: dark;
+    }
+  }
+
+  :root[data-theme="dark"] {
+    --ground:   #13161b;
+    --surface:  #1a1e25;
+    --sunken:   #22272f;
+    --ink:      #e7ebf0;
+    --ink-2:    #9aa5b1;
+    --ink-3:    #6d7885;
+    --line:     #2b323b;
+    --line-2:   #3b434e;
+    --accent:   #e0924e;
+    --accent-b: #33281d;
+    --ok:       #4fb39c;
+    --no:       #d8746e;
+    --shadow:   0 1px 2px rgba(0,0,0,.3), 0 8px 24px -12px rgba(0,0,0,.6);
+    color-scheme: dark;
+  }
+
+  body {
+    background: var(--ground);
+    color: var(--ink);
+    font-family: var(--f-body);
+    font-size: 16.5px;
+    line-height: 1.72;
+    -webkit-font-smoothing: antialiased;
+  }
+
+  .wrap {
+    max-width: 47rem;
+    margin: 0 auto;
+    padding: 0 1.5rem 6rem;
+  }
+
+  /* ── 머리 ── */
+  header {
+    padding: 4.5rem 0 2.75rem;
+    border-bottom: 2px solid var(--ink);
+    margin-bottom: 3rem;
+  }
+  .eyebrow {
+    font-family: var(--f-mono);
+    font-size: .72rem;
+    font-weight: 500;
+    letter-spacing: .14em;
+    text-transform: uppercase;
+    color: var(--accent);
+    margin-bottom: 1.1rem;
+  }
+  h1 {
+    font-family: var(--f-disp);
+    font-weight: 800;
+    font-size: clamp(2.3rem, 6.5vw, 3.4rem);
+    line-height: 1.08;
+    letter-spacing: -.02em;
+    text-wrap: balance;
+    margin-bottom: 1.1rem;
+  }
+  .standfirst {
+    font-size: 1.08rem;
+    color: var(--ink-2);
+    max-width: 38rem;
+  }
+  .standfirst strong { color: var(--ink); font-weight: 600; }
+
+  /* ── 절 ── */
+  section { margin-bottom: 3.75rem; }
+  h2 {
+    font-family: var(--f-disp);
+    font-weight: 800;
+    font-size: 1.6rem;
+    letter-spacing: -.015em;
+    line-height: 1.25;
+    text-wrap: balance;
+    margin-bottom: .35rem;
+    display: flex;
+    align-items: baseline;
+    gap: .7rem;
+  }
+  h2 .num {
+    font-family: var(--f-mono);
+    font-size: .78rem;
+    font-weight: 600;
+    color: var(--accent);
+    letter-spacing: .06em;
+    flex: none;
+  }
+  h2 + .dek {
+    color: var(--ink-2);
+    font-size: .95rem;
+    margin: 0 0 1.6rem 2.3rem;
+    padding-bottom: 1.1rem;
+    border-bottom: 1px solid var(--line);
+  }
+  h3 {
+    font-family: var(--f-disp);
+    font-weight: 700;
+    font-size: 1.08rem;
+    letter-spacing: -.005em;
+    margin: 2.2rem 0 .6rem;
+  }
+  p { margin-bottom: 1.05rem; }
+  p:last-child { margin-bottom: 0; }
+  strong { font-weight: 600; }
+  em { font-style: normal; color: var(--accent); font-weight: 500; }
+
+  code {
+    font-family: var(--f-mono);
+    font-size: .855em;
+    background: var(--sunken);
+    border: 1px solid var(--line);
+    border-radius: 3px;
+    padding: .08em .34em;
+    white-space: nowrap;
+  }
+
+  /* ── 수치 강조 ── */
+  .figures {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr));
+    gap: 1px;
+    background: var(--line);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    overflow: hidden;
+    margin: 1.9rem 0;
+  }
+  .fig-cell {
+    background: var(--surface);
+    padding: 1.05rem 1.15rem;
+  }
+  .fig-cell .v {
+    font-family: var(--f-mono);
+    font-size: 1.42rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+    letter-spacing: -.02em;
+    line-height: 1.15;
+    display: block;
+  }
+  .fig-cell .v .unit { font-size: .62em; font-weight: 500; color: var(--ink-2); margin-left: .12em; }
+  .fig-cell .k {
+    font-family: var(--f-mono);
+    font-size: .68rem;
+    letter-spacing: .05em;
+    text-transform: uppercase;
+    color: var(--ink-3);
+    margin-top: .4rem;
+    display: block;
+  }
+  .fig-cell.hot .v { color: var(--accent); }
+
+  /* ── 인용/주의 ── */
+  .note {
+    border-left: 3px solid var(--accent);
+    background: var(--accent-b);
+    border-radius: 0 5px 5px 0;
+    padding: 1rem 1.15rem;
+    margin: 1.7rem 0;
+    font-size: .94rem;
+  }
+  .note p { margin-bottom: .55rem; }
+  .note p:last-child { margin-bottom: 0; }
+  .note .tag {
+    font-family: var(--f-mono);
+    font-size: .68rem;
+    font-weight: 600;
+    letter-spacing: .09em;
+    text-transform: uppercase;
+    color: var(--accent);
+    display: block;
+    margin-bottom: .35rem;
+  }
+
+  /* ── 도해 ── */
+  figure {
+    margin: 2.25rem 0;
+    padding: 1.5rem 1.35rem 1.15rem;
+    background: var(--surface);
+    border: 1px solid var(--line);
+    border-radius: 7px;
+    box-shadow: var(--shadow);
+  }
+  figure svg { display: block; width: 100%; max-width: 100%; height: auto; color: var(--ink); }
+  figcaption {
+    font-size: .845rem;
+    color: var(--ink-2);
+    line-height: 1.6;
+    margin-top: 1.05rem;
+    padding-top: .85rem;
+    border-top: 1px solid var(--line);
+  }
+  figcaption b { color: var(--ink); font-weight: 600; }
+
+  /* ── 표 ── */
+  .tbl-scroll { overflow-x: auto; margin: 1.9rem 0; border: 1px solid var(--line); border-radius: 7px; background: var(--surface); }
+  table { border-collapse: collapse; width: 100%; min-width: 40rem; font-size: .9rem; }
+  th, td { text-align: left; padding: .72rem .9rem; border-bottom: 1px solid var(--line); vertical-align: top; }
+  thead th {
+    font-family: var(--f-disp);
+    font-weight: 700;
+    font-size: .92rem;
+    background: var(--sunken);
+    border-bottom: 2px solid var(--line-2);
+    position: sticky; top: 0;
+  }
+  thead th.lead { font-family: var(--f-mono); font-size: .7rem; font-weight: 600; letter-spacing: .08em; text-transform: uppercase; color: var(--ink-3); }
+  tbody th {
+    font-weight: 500;
+    color: var(--ink-2);
+    font-size: .85rem;
+    width: 12rem;
+    background: color-mix(in srgb, var(--sunken) 45%, transparent);
+  }
+  tbody tr:last-child th, tbody tr:last-child td { border-bottom: none; }
+  td.num, td .mono { font-family: var(--f-mono); font-variant-numeric: tabular-nums; }
+  .yes { color: var(--ok); font-weight: 600; }
+  .nope { color: var(--no); font-weight: 600; }
+  td.win { background: color-mix(in srgb, var(--accent) 8%, transparent); }
+
+  /* ── 목록 ── */
+  ul.tight { list-style: none; margin: 1.15rem 0; display: grid; gap: .72rem; }
+  ul.tight li { padding-left: 1.5rem; position: relative; }
+  ul.tight li::before {
+    content: "";
+    position: absolute; left: .3rem; top: .72em;
+    width: .42rem; height: .42rem;
+    border: 1.5px solid var(--accent);
+    border-radius: 50%;
+  }
+
+  footer {
+    margin-top: 4rem; padding-top: 1.4rem;
+    border-top: 1px solid var(--line);
+    font-size: .82rem; color: var(--ink-3);
+    font-family: var(--f-mono);
+    line-height: 1.85;
+  }
+  footer b { color: var(--ink-2); font-weight: 500; }
+
+  @media (max-width: 34rem) {
+    body { font-size: 16px; }
+    header { padding-top: 3rem; }
+    h2 { font-size: 1.35rem; }
+    h2 + .dek { margin-left: 0; }
+    tbody th { width: 8.5rem; }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+
+  /* ── 이번 판에서 추가된 표·강조 ── */
+  .tw { overflow-x: auto; margin: 1.2rem 0 1.5rem; border: 1px solid var(--line);
+        border-radius: 6px; background: var(--surface); }
+  .tw table { border-collapse: collapse; width: 100%; font-size: .9rem; min-width: 0; }
+  .tw th, .tw td { padding: .6rem .9rem; border-bottom: 1px solid var(--line);
+                   text-align: right; font-variant-numeric: tabular-nums; }
+  .tw th:first-child, .tw td:first-child { text-align: left; }
+  .tw thead th { font-weight: 600; font-size: .85rem; background: var(--sunken);
+                 border-bottom: 1.5px solid var(--line-2); color: var(--ink-2); }
+  .tw tbody tr:last-child td { border-bottom: none; }
+  .tw td.n, .tw th.n { font-family: var(--f-mono); }
+  .tw tr.hi td { background: var(--accent-b); font-weight: 600; }
+  .tw tr.sep td { border-top: 1.5px solid var(--line-2); }
+  .tw td.lbl { color: var(--ink-2); }
+  .tw .m { color: var(--ok); font-weight: 600; }
+  .tw .d { color: var(--accent); font-weight: 600; }
+  .key { border-left: 3px solid var(--ok); background: var(--surface);
+         border-top: 1px solid var(--line); border-right: 1px solid var(--line);
+         border-bottom: 1px solid var(--line); border-radius: 0 5px 5px 0;
+         padding: 1rem 1.15rem; margin: 1.6rem 0; font-size: .94rem; }
+  .key b { font-weight: 600; }
+</style>
+
+<div class="wrap">
+
+<header>
+  <div class="eyebrow">Qwen3.8-Flash-Next · llama.cpp · CMP 170HX</div>
+  <h1>디스크에 사는 51B</h1>
+  <p class="standfirst">177B 모델의 파라미터 중 <strong>51.2B</strong>가 VRAM 에도 RAM 에도 올라가지 않는다.
+  NVMe 위의 파일에 그대로 누워 있고, 토큰당 <strong>약 1.9 KB</strong>씩만 깨어난다.
+  그런데 그렇게 해도 <strong>속도가 거의 안 떨어진다</strong> — 왜 그런지가 이 글이다.</p>
+</header>
+
+<div class="figures">
+  <div class="fig-cell"><span class="v">47.9<span class="unit">tok/s</span></span><span class="k">테이블이 캐시에</span></div>
+  <div class="fig-cell hot"><span class="v">41.9<span class="unit">tok/s</span></span><span class="k">캐시 전무 (바닥)</span></div>
+  <div class="fig-cell"><span class="v">44.9<span class="unit">GiB</span></span><span class="k">VRAM / 64.0</span></div>
+  <div class="fig-cell"><span class="v">2.7<span class="unit">MB/s</span></span><span class="k">SSD 읽기</span></div>
+  <div class="fig-cell"><span class="v">0<span class="unit">B</span></span><span class="k">SSD 쓰기</span></div>
+</div>
+
+<!-- ═══════════════ 1 ═══════════════ -->
+<section>
+  <h2><span class="num">01</span> 무슨 일이 일어나는가</h2>
+  <p class="dek">모델 파일을 열어두고, 텐서 하나를 <em>메모리로 읽어들이지 않은 채</em> 남겨둔다.</p>
+
+  <p>보통 모델을 올린다는 건 파일을 읽어 그 내용을 메모리에 <strong>복사</strong>하는 일이다.
+  여기서는 그 복사를 하지 않는다. 파일을 주소 공간에 붙여만 두고(<code>mmap</code>),
+  내용은 계속 디스크에 둔다. 연산이 그 주소를 건드리는 순간 커널이
+  <strong>4 KB 한 장만</strong> 읽어 온다.</p>
+
+  <p>llama.cpp 에 이 용도의 전용 경로가 있다. 아키텍처가 텐서에
+  <code>TENSOR_READ_LAZY</code> 를 달면 로더가 그것만 mmap 영역에 남긴다.
+  스위치는 <code>--lazy-mode</code>, 기본값 <code>auto</code> 가
+  <strong>4 GiB 를 넘는 마킹된 텐서</strong>를 자동으로 잡는다. 36 GiB 짜리 n-gram 테이블은 당연히 걸린다.</p>
+
+  <figure>
+<svg viewBox="0 0 880 330" role="img" aria-label="NVMe 의 GGUF 샤드에서 4 KB 페이지가 호스트 페이지 캐시로 폴트되고, CPU 가 16행을 게더해 결과 5 KB 만 PCIe 로 GPU 에 건네는 경로. 메모리 압박 시 캐시는 쓰기 없이 그냥 버려진다.">
+      <defs>
+        <marker id="ar" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+        </marker>
+        <marker id="ar-c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--accent)"/>
+        </marker>
+      </defs>
+
+      <!-- NVMe -->
+      <rect x="16" y="66" width="212" height="150" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="122" y="48" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">NVMe · GGUF 샤드 2</text>
+      <text x="122" y="92" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".62">per_layer_token_embd</text>
+      <text x="122" y="112" text-anchor="middle" font-size="15" font-weight="600" fill="currentColor">36.6 GiB</text>
+      <text x="122" y="131" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">3.2억 행 × 160값 · Q5_1</text>
+      <g fill="currentColor" opacity=".2">
+        <rect x="38" y="152" width="14" height="14" rx="1.5"/><rect x="58" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="78" y="152" width="14" height="14" rx="1.5"/><rect x="98" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="118" y="152" width="14" height="14" rx="1.5"/><rect x="138" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="158" y="152" width="14" height="14" rx="1.5"/><rect x="178" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="38" y="172" width="14" height="14" rx="1.5"/><rect x="58" y="172" width="14" height="14" rx="1.5"/>
+        <rect x="78" y="172" width="14" height="14" rx="1.5"/><rect x="98" y="172" width="14" height="14" rx="1.5"/>
+        <rect x="118" y="172" width="14" height="14" rx="1.5"/><rect x="138" y="172" width="14" height="14" rx="1.5"/>
+        <rect x="158" y="172" width="14" height="14" rx="1.5"/><rect x="178" y="172" width="14" height="14" rx="1.5"/>
+      </g>
+      <rect x="78" y="152" width="14" height="14" rx="1.5" fill="var(--accent)"/>
+      <rect x="158" y="172" width="14" height="14" rx="1.5" fill="var(--accent)"/>
+      <text x="122" y="205" text-anchor="middle" font-size="10" fill="currentColor" opacity=".55">4 KB 페이지</text>
+
+      <!-- 폴트 화살표 -->
+      <line x1="232" y1="128" x2="316" y2="128" stroke="var(--accent)" stroke-width="2" marker-end="url(#ar-c)"/>
+      <text x="274" y="118" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">폴트</text>
+      <text x="274" y="146" text-anchor="middle" font-size="10" fill="var(--accent)" opacity=".85">165 µs</text>
+
+      <!-- 페이지 캐시 -->
+      <rect x="320" y="66" width="212" height="150" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="426" y="48" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">호스트 페이지 캐시</text>
+      <text x="426" y="92" text-anchor="middle" font-size="11.5" fill="currentColor" opacity=".62">커널이 남는 RAM 을 쓴다</text>
+      <text x="426" y="112" text-anchor="middle" font-size="15" font-weight="600" fill="currentColor">21 GiB</text>
+      <text x="426" y="131" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">clean · 파일 백드</text>
+      <g fill="currentColor" opacity=".2">
+        <rect x="342" y="152" width="14" height="14" rx="1.5"/><rect x="362" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="382" y="152" width="14" height="14" rx="1.5"/><rect x="402" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="422" y="152" width="14" height="14" rx="1.5"/><rect x="442" y="152" width="14" height="14" rx="1.5"/>
+        <rect x="462" y="152" width="14" height="14" rx="1.5"/><rect x="482" y="152" width="14" height="14" rx="1.5"/>
+      </g>
+      <g fill="var(--accent)" opacity=".85">
+        <rect x="342" y="172" width="14" height="14" rx="1.5"/><rect x="382" y="172" width="14" height="14" rx="1.5"/>
+        <rect x="422" y="172" width="14" height="14" rx="1.5"/><rect x="462" y="172" width="14" height="14" rx="1.5"/>
+      </g>
+      <text x="426" y="205" text-anchor="middle" font-size="10" fill="currentColor" opacity=".55">최근 쓴 n-gram 행</text>
+
+      <!-- 게더 화살표 -->
+      <line x1="536" y1="128" x2="620" y2="128" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="578" y="118" text-anchor="middle" font-size="11" font-weight="600" fill="currentColor">GET_ROWS</text>
+      <text x="578" y="146" text-anchor="middle" font-size="10" fill="currentColor" opacity=".7">16행 · 1.9 KB</text>
+
+      <!-- CPU / GPU -->
+      <rect x="624" y="66" width="240" height="62" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="744" y="48" text-anchor="middle" font-size="12.5" font-weight="600" fill="currentColor">연산</text>
+      <text x="744" y="92" text-anchor="middle" font-size="12" fill="currentColor">CPU 백엔드 — 게더</text>
+      <text x="744" y="111" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">행렬곱 아님 · 색인만</text>
+
+      <line x1="744" y1="132" x2="744" y2="162" stroke="currentColor" stroke-width="1.5" marker-end="url(#ar)"/>
+      <text x="756" y="152" font-size="10" fill="currentColor" opacity=".75">PCIe · 결과 5 KB</text>
+
+      <rect x="624" y="166" width="240" height="50" rx="5" fill="none" stroke="currentColor" stroke-width="1.5"/>
+      <text x="744" y="189" text-anchor="middle" font-size="12" fill="currentColor">GPU — 나머지 전부</text>
+      <text x="744" y="206" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".62">VRAM 44.9 GiB</text>
+
+      <!-- 버림 경로 -->
+      <path d="M 366 224 L 366 262 L 122 262 L 122 224" fill="none" stroke="var(--accent)" stroke-width="1.5"
+            stroke-dasharray="5 4" marker-end="url(#ar-c)"/>
+      <text x="244" y="279" text-anchor="middle" font-size="11" font-weight="600" fill="var(--accent)">메모리 압박 → 그냥 버린다</text>
+      <text x="244" y="296" text-anchor="middle" font-size="10.5" fill="var(--accent)" opacity=".8">clean page · 쓰기 0 · 원본이 파일에 있다</text>
+
+      <line x1="16" y1="312" x2="864" y2="312" stroke="currentColor" stroke-width="1" opacity=".18"/>
+      <text x="16" y="328" font-size="10.5" fill="currentColor" opacity=".6">스왑이라면: 익명 페이지라 내보내기 전에 디스크에 <tspan font-weight="600">써야</tspan> 한다 — 4 KB 랜덤 쓰기 25 MB/s, TBW 소모</text>
+    </svg>
+    <figcaption><b>왕복 경로.</b> 붉은 선이 디스크를 건드리는 유일한 구간이다.
+    캐시가 버려져도 원본이 파일에 그대로 있으므로 <b>쓰기가 발생하지 않는다</b> —
+    이것이 스왑과의 결정적 차이이고, SSD 수명을 걱정하지 않아도 되는 이유다.</figcaption>
+  </figure>
+
+  <p><strong>흔히 말하는 오프로딩과도 다르다.</strong> 오프로딩은 가중치를 호스트에 두었다가
+  필요할 때 GPU 로 실어 나른다. 여기서는 테이블을 GPU 로 보내지 않는다. 연산 자체를 CPU 에서 하고
+  <strong>결과만</strong> 건네준다 — 토큰당 약 5 KB 다.</p>
+</section>
+
+<!-- ═══════════════ 2 ═══════════════ -->
+<section>
+  <h2><span class="num">02</span> 왜 이게 되는가</h2>
+  <p class="dek">저장장치가 빨라서가 아니라, <em>이 텐서가 행렬곱에 안 쓰이기 때문</em>이다.</p>
+
+  <p>토큰 하나를 만들려면 그 토큰에 관여하는 가중치를 전부 한 번씩 읽어야 한다.
+  그래서 어떤 가중치를 느린 저장 계층에 둬도 되는지는
+  <strong>토큰당 몇 바이트를 읽는가</strong> 하나로 갈린다.</p>
+
+  <h3>전문가 가중치는 이 문제를 풀지 못한다</h3>
+  <p>이 모델의 본체는 125B 중 토큰당 6B 만 활성화된다. 여기서 흔한 오해가 나온다 —
+  <em>그럼 6B 만 갖고 있으면 되지 않나?</em> 아니다.
+  <strong>어느</strong> 전문가 10개가 켜질지는 라우터가 그 토큰의 내용을 보고 정하고, 매 토큰 달라진다.
+  미리 알 수 없으니 512개 전부가 즉시 읽힐 수 있는 곳에 있어야 한다.</p>
+
+  <figure>
+<svg viewBox="0 0 880 300" role="img" aria-label="왼쪽은 MoE 전문가로, 학습된 라우터가 매 토큰 다른 전문가를 골라 토큰당 2.2 GB 를 읽으므로 페이징이 불가능하다. 오른쪽은 PLE 테이블로, 직전 두세 토큰의 해시가 결정적 주소를 가리켜 토큰당 1.9 KB 만 읽으므로 페이징이 가능하다.">
+      <defs>
+        <marker id="ar2" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="currentColor"/>
+        </marker>
+        <marker id="ar2c" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,1 L9,5 L0,9 z" fill="var(--accent)"/>
+        </marker>
+      </defs>
+
+      <line x1="440" y1="14" x2="440" y2="286" stroke="currentColor" stroke-width="1" opacity=".2"/>
+
+      <!-- ── 왼쪽: MoE ── -->
+      <text x="20" y="26" font-size="12.5" font-weight="600" fill="currentColor">MoE 전문가 · 512개 중 10개</text>
+      <text x="20" y="44" font-size="11" fill="currentColor" opacity=".62">주소를 미리 알 수 없다</text>
+
+      <rect x="20" y="60" width="86" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="63" y="82" text-anchor="middle" font-size="11.5" fill="currentColor">토큰</text>
+      <line x1="110" y1="77" x2="140" y2="77" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+      <rect x="144" y="56" width="106" height="42" rx="4" fill="none" stroke="currentColor" stroke-width="1.8"/>
+      <text x="197" y="73" text-anchor="middle" font-size="11.5" font-weight="600" fill="currentColor">라우터</text>
+      <text x="197" y="89" text-anchor="middle" font-size="10" fill="currentColor" opacity=".62">학습된 게이트</text>
+
+      <!-- 분기 -->
+      <path d="M 254 77 L 282 77" stroke="currentColor" stroke-width="1.3"/>
+      <path d="M 282 77 L 282 126 M 282 77 L 282 40 M 282 77 L 282 170" stroke="currentColor" stroke-width="1.3" opacity=".5"/>
+      <line x1="282" y1="40"  x2="316" y2="40"  stroke="currentColor" stroke-width="1.3" opacity=".5" marker-end="url(#ar2)"/>
+      <line x1="282" y1="77"  x2="316" y2="77"  stroke="currentColor" stroke-width="2" marker-end="url(#ar2)"/>
+      <line x1="282" y1="126" x2="316" y2="126" stroke="currentColor" stroke-width="1.3" opacity=".5" marker-end="url(#ar2)"/>
+      <line x1="282" y1="170" x2="316" y2="170" stroke="currentColor" stroke-width="1.3" opacity=".5" marker-end="url(#ar2)"/>
+      <text x="299" y="196" text-anchor="middle" font-size="9.5" fill="currentColor" opacity=".55">매 토큰 다름</text>
+
+      <rect x="320" y="26" width="94" height="28" rx="3" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".45"/>
+      <text x="367" y="45" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".6">전문가 #7</text>
+      <rect x="320" y="63" width="94" height="28" rx="3" fill="currentColor" fill-opacity=".1" stroke="currentColor" stroke-width="1.6"/>
+      <text x="367" y="82" text-anchor="middle" font-size="10.5" font-weight="600" fill="currentColor">전문가 #142</text>
+      <rect x="320" y="112" width="94" height="28" rx="3" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".45"/>
+      <text x="367" y="131" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".6">전문가 #305</text>
+      <rect x="320" y="156" width="94" height="28" rx="3" fill="none" stroke="currentColor" stroke-width="1.2" opacity=".45"/>
+      <text x="367" y="175" text-anchor="middle" font-size="10.5" fill="currentColor" opacity=".6">…509개 더</text>
+
+      <rect x="20" y="216" width="394" height="60" rx="5" fill="currentColor" fill-opacity=".06" stroke="currentColor" stroke-width="1.3"/>
+      <text x="38" y="240" font-size="21" font-weight="600" fill="currentColor">2.2 GB</text>
+      <text x="130" y="240" font-size="11.5" fill="currentColor" opacity=".7">/ 토큰</text>
+      <text x="38" y="262" font-size="11" fill="currentColor" opacity=".72">→ 전부 VRAM 상주 필수 · 페이징 불가</text>
+
+      <!-- ── 오른쪽: PLE ── -->
+      <text x="466" y="26" font-size="12.5" font-weight="600" fill="var(--accent)">PLE 테이블 · 3.2억 행 중 16행</text>
+      <text x="466" y="44" font-size="11" fill="currentColor" opacity=".62">주소가 결정적이다</text>
+
+      <rect x="466" y="60" width="86" height="34" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="509" y="76" text-anchor="middle" font-size="10.5" fill="currentColor">직전 2~3</text>
+      <text x="509" y="89" text-anchor="middle" font-size="10.5" fill="currentColor">토큰</text>
+      <line x1="556" y1="77" x2="586" y2="77" stroke="currentColor" stroke-width="1.3" marker-end="url(#ar2)"/>
+
+      <rect x="590" y="56" width="106" height="42" rx="4" fill="none" stroke="var(--accent)" stroke-width="1.8"/>
+      <text x="643" y="73" text-anchor="middle" font-size="11.5" font-weight="600" fill="var(--accent)">해시</text>
+      <text x="643" y="89" text-anchor="middle" font-size="10" fill="currentColor" opacity=".62">학습 없음 · 순수 함수</text>
+
+      <line x1="700" y1="77" x2="756" y2="77" stroke="var(--accent)" stroke-width="1" marker-end="url(#ar2c)"/>
+      <text x="728" y="68" text-anchor="middle" font-size="9.5" fill="var(--accent)">주소</text>
+
+      <rect x="760" y="26" width="100" height="158" rx="4" fill="none" stroke="currentColor" stroke-width="1.3"/>
+      <text x="810" y="18" text-anchor="middle" font-size="10" fill="currentColor" opacity=".6">36.6 GiB</text>
+      <g fill="currentColor" opacity=".16">
+        <rect x="772" y="38"  width="76" height="7" rx="1"/><rect x="772" y="50"  width="76" height="7" rx="1"/>
+        <rect x="772" y="62"  width="76" height="7" rx="1"/><rect x="772" y="86"  width="76" height="7" rx="1"/>
+        <rect x="772" y="98"  width="76" height="7" rx="1"/><rect x="772" y="110" width="76" height="7" rx="1"/>
+        <rect x="772" y="122" width="76" height="7" rx="1"/><rect x="772" y="146" width="76" height="7" rx="1"/>
+        <rect x="772" y="158" width="76" height="7" rx="1"/><rect x="772" y="170" width="76" height="7" rx="1"/>
+      </g>
+      <rect x="772" y="74" width="76" height="7" rx="1" fill="var(--accent)"/>
+      <rect x="772" y="134" width="76" height="7" rx="1" fill="var(--accent)"/>
+      <text x="810" y="200" text-anchor="middle" font-size="9.5" fill="var(--accent)">16행 = 1.9 KB</text>
+
+      <rect x="466" y="216" width="394" height="60" rx="5" fill="var(--accent)" fill-opacity=".08" stroke="var(--accent)" stroke-width="1.3"/>
+      <text x="484" y="240" font-size="21" font-weight="600" fill="var(--accent)">1.9 KB</text>
+      <text x="574" y="240" font-size="11.5" fill="currentColor" opacity=".7">/ 토큰 — 1,300만 분의 1</text>
+      <text x="484" y="262" font-size="11" fill="currentColor" opacity=".72">→ 미스해도 4 KB 읽기 몇 번 · 페이징 가능</text>
+    </svg>
+    <figcaption><b>같은 "희소 접근"인데 성질이 정반대다.</b> 왼쪽은 어느 조각이 필요한지를
+    <b>학습된 라우터가 그 자리에서 정하고</b> 조각 하나가 수백 MB 다. 오른쪽은 주소가
+    직전 토큰들의 순수 함수이고 조각 하나가 120 바이트다. 성패를 가르는 건
+    희소성이 아니라 <b>주소의 예측 가능성 × 조각의 크기</b>다.</figcaption>
+  </figure>
+
+  <p>llama.cpp 의 정의에서 이 텐서의 연산은 행렬곱이 아니라 <code>GET_ROWS</code>, 즉 <strong>색인</strong>이다.
+  가중치가 아니라 <strong>사전</strong>인 셈이고, 사전은 통째로 펼쳐 둘 필요가 없다.
+  36 GiB 중 토큰당 1.9 KB — <strong>1,300만 분의 1</strong>이다.</p>
+</section>
+
+<!-- ═══════════════ 3 ═══════════════ -->
+<section>
+  <h2><span class="num">03</span> 중요한 건 장치 종류가 아니다</h2>
+  <p class="dek">"읽기 한 번에 얼마나 걸리나" <em>하나</em>가 전부다. 그걸 실험으로 확인했다.</p>
+
+  <p>토큰 하나를 만드는 데 이 박스에서 <strong>20.6 ms</strong> 가 걸린다. 그중 GPU 가 하는 일이
+  대부분이고, 디스크는 <strong>캐시가 하나도 없는 최악의 조건에서조차</strong> 이만큼이다:</p>
+
+  <div class="tw"><table>
+  <thead><tr><th>토큰 하나 · NVMe · 최악 조건</th><th class="n">시간</th><th class="n">비중</th></tr></thead>
+  <tbody>
+    <tr><td>GPU 연산</td><td class="n">20.6 ms</td><td class="n">86%</td></tr>
+    <tr class="hi"><td>디스크 — 4 KB 읽기 16회</td><td class="n">3.3 ms</td><td class="n">14%</td></tr>
+    <tr class="sep"><td class="lbl">합</td><td class="n">24.0 ms</td><td class="n">= 41.9 tok/s</td></tr>
+  </tbody></table></div>
+
+  <p>그러면 <strong>디스크가 얼마나 느려지면</strong> 이 비중이 뒤집힐까. GPU 연산 20.6 ms 를
+  디스크가 따라잡으려면 읽기 16회로 그만큼을 써야 하니 <strong>한 번에 1.29 ms</strong> 다.
+  그게 임계다. NVMe 는 209 µs 로 임계의 <strong>6분의 1</strong>이다.</p>
+
+  <h3>그래서 SSD 를 일부러 느리게 만들어 봤다</h3>
+
+  <p>장치를 바꾸는 대신 <strong>같은 NVMe 에 경쟁 읽기 부하를 걸어</strong> 읽기 한 번의 시간만
+  올렸다. 하드디스크가 느린 이유(헤드가 움직여야 함)와는 전혀 다른 원인인데,
+  <strong>결과가 같은지</strong>를 보는 것이다.</p>
+
+  <div class="tw"><table>
+  <thead><tr><th>조건</th><th class="n">읽기 1회</th><th class="n">캐시 있을 때</th><th class="n">캐시 없을 때</th></tr></thead>
+  <tbody>
+    <tr><td>NVMe · 부하 없음</td><td class="n">259 µs</td><td class="n">48.5</td><td class="n">42.1</td></tr>
+    <tr><td>NVMe · 경합</td><td class="n">1,183 µs</td><td class="n">48.5</td><td class="n">32.2</td></tr>
+    <tr><td>NVMe · 경합</td><td class="n">4,462 µs</td><td class="n">48.4</td><td class="n">13.6</td></tr>
+    <tr class="hi"><td>NVMe · 경합 (최대)</td><td class="n">6,824 µs</td><td class="n">48.3</td><td class="n">10.0</td></tr>
+    <tr class="hi"><td>HDD · 2009년 7200 rpm</td><td class="n">7,237 µs</td><td class="n">48.8</td><td class="n">9.3</td></tr>
+  </tbody></table></div>
+
+  <div class="key">
+    <b>느리게 만든 SSD 와 진짜 하드디스크가 같은 값을 낸다.</b>
+    읽기 시간이 1.06배 차이일 때 속도도 1.08배 차이다 — <b>같은 곡선 위에 있다.</b>
+    즉 하드디스크가 느린 이유가 "회전 디스크라서" 가 아니라
+    <b>"읽기 한 번에 7 ms 가 걸려서"</b> 다. 장치 종류는 그 숫자를 통해서만 영향을 준다.
+  </div>
+
+  <p><strong>그리고 오른쪽 두 열의 대비가 이 방식의 성질이다.</strong> 읽기 시간이 26배 벌어지는
+  동안 <strong>"캐시 있을 때" 열은 48.3~48.8 로 꿈쩍도 하지 않는다.</strong>
+  디스크는 <strong>읽으러 갈 때만</strong> 존재한다. 실제 운용은 두 열 사이 어딘가고,
+  이 박스에서 관측된 미스율은 <strong>35~100%</strong> 였다 — 남는 RAM 이 자동으로 캐시가 되므로
+  캐시가 완전히 비는 일은 없다.</p>
+
+  <div class="note">
+    <span class="tag">그래서 무엇이 중요한가</span>
+    <p>속도 자체보다 <b>무엇을 디스크에 두느냐</b>가 먼저다. 같은 하드디스크로
+    <b>전문가 가중치</b>를 스트리밍하면 토큰당 2.2 GB ÷ ~110 MB/s = <b>20초/토큰(0.05 tok/s)</b> 이다.
+    같은 장치에서 <b>190배</b> 차이가 난다. n-gram 테이블은 토큰당 1.9 KB 라
+    읽기가 임계 아래이기만 하면 사실상 공짜가 된다.</p>
+  </div>
+
+<!-- ═══════════════ 4 ═══════════════ -->
+<section>
+  <h2><span class="num">04</span> 세 가지 방식 — 공정하게</h2>
+  <p class="dek">셋 다 같은 수학을 한다. 차이는 <em>테이블을 어느 저장 계층에 두느냐</em>와, 그 대가다.</p>
+
+  <p>먼저 <strong>토큰 하나를 만들 때 각 방식이 어디서 얼마를 끌어오는지</strong>다.
+  이게 방식을 가르는 근본 수치다.</p>
+
+  <div class="tw"><table>
+  <thead><tr><th>방식</th><th class="n">테이블 정밀도</th><th class="n">필요한 데이터</th><th class="n">실제 전송량</th><th class="n">초당</th></tr></thead>
+  <tbody>
+    <tr><td>전부 VRAM</td><td class="n">6 bpw</td><td class="n">1.9 KB</td><td class="n">— (VRAM 내부)</td><td class="n">—</td></tr>
+    <tr><td>FreeToken — pinned RAM</td><td class="n">8 bpw</td><td class="n">2.6 KB</td><td class="n">2.6 KB</td><td class="n">124 KB/s</td></tr>
+    <tr class="hi"><td>SSD 페이징</td><td class="n">6 bpw</td><td class="n">1.9 KB</td><td class="n">최대 64 KB</td><td class="n">최대 2.7 MB/s</td></tr>
+    <tr class="sep"><td class="lbl">(대조) 전문가를 매번 교체</td><td class="n">—</td><td class="n d">2.21 GB</td><td class="n d">2.21 GB</td><td class="n d">93 GB/s</td></tr>
+  </tbody></table></div>
+
+  <p>맨 아랫줄이 <strong>"왜 보통은 안 되는가"</strong> 다. 전문가 가중치를 저장 계층에 두면
+  토큰당 2.21 GB 를 끌어와야 하고, 42 tok/s 를 내려면 <strong>초당 93 GB</strong> 가 필요하다.
+  어떤 저장장치도 못 한다. n-gram 테이블은 <strong>34,000배 적다.</strong></p>
+
+  <p>위 세 줄은 <strong>필요한 데이터가 다 2 KB 안팎으로 같다.</strong> 어느 방식이든
+  토큰당 16행만 꺼내면 되기 때문이다. 다른 것은 <strong>그 16행이 어디 있느냐</strong>뿐이고,
+  그래서 전송량도 VRAM 내부냐 · RAM 이냐 · 디스크냐로만 갈린다.</p>
+
+  <p>SSD 페이징만 전송량이 데이터보다 <strong>34배</strong> 크다. 필요한 건 1.9 KB 인데
+  디스크는 <strong>4 KB 페이지 단위로만</strong> 읽으므로, 16행이 서로 다른 페이지에 흩어져 있으면
+  16번의 읽기가 각각 4 KB 를 가져온다. 캐시가 데워질수록 이 값은 0 을 향해 내려간다 —
+  64 KB 는 <strong>캐시가 하나도 없을 때의 상한</strong>이다.</p>
+
+  <h3>방식별 비교표</h3>
+
+  <div class="tbl-scroll">
+    <table>
+      <thead>
+        <tr><th class="lead">축</th><th>전부 VRAM</th><th>FreeToken · vLLM</th><th>SSD 페이징</th></tr>
+      </thead>
+      <tbody>
+        <tr><th>테이블의 거처</th>
+          <td>GPU VRAM</td><td>호스트 RAM — <span class="mono">pinned</span></td>
+          <td class="win">NVMe 파일 — <span class="mono">mmap</span></td></tr>
+        <tr><th>필요 VRAM<br><span class="mono" style="font-size:.9em">(4.27bpw 기준)</span></th>
+          <td class="num"><span class="nope">54.5 + 38.4 GB</span></td><td class="num">54.5 GB</td><td class="num win">54.5 GB</td></tr>
+        <tr><th>필요 호스트 RAM</th>
+          <td class="num">약 0</td><td class="num"><span class="nope">47.7 GiB 고정</span></td>
+          <td class="num win"><span class="yes">0</span> — 남는 만큼 캐시로</td></tr>
+        <tr><th class="lbl" style="font-weight:400;font-size:.82rem">&nbsp;&nbsp;↳ 정말 0이면?</th>
+          <td colspan="2" style="font-size:.83rem;color:var(--ink-2)">해당 없음</td>
+          <td style="font-size:.83rem;color:var(--ink-2)">RAM 0 = 캐시 0 = <b>미스율 100%</b>.
+            그때 실측 <b>41.9 tok/s</b>. 실제로는 남는 RAM 이 자동으로 캐시가 되므로 항상 이보다 빠르다</td></tr>
+
+        <tr><th style="border-top:2px solid var(--line-2)">디코드 손해</th>
+          <td style="border-top:2px solid var(--line-2)">없음 (기준)</td>
+          <td style="border-top:2px solid var(--line-2)">없음</td>
+          <td style="border-top:2px solid var(--line-2)"><span class="nope">0 ~ 14%</span> — 미스율에 비례</td></tr>
+        <tr><th>콜드 프리필 손해</th>
+          <td>없음</td><td>없음</td>
+          <td><span class="nope">최대 2.5배</span> — 30k 프롬프트 첫 처리 시 665 → 262 tok/s</td></tr>
+        <tr><th>성능의 예측 가능성</th>
+          <td>일정</td><td>일정</td>
+          <td><span class="nope">흔들림</span> — 캐시 상태에 따라 41.9 ~ 48.5 tok/s</td></tr>
+        <tr><th>다른 프로세스의 디스크 부하</th>
+          <td>면역</td><td>면역</td>
+          <td><span class="nope">취약</span> — 경쟁 읽기 57k op/s 에서 −25%</td></tr>
+        <tr><th>SSD 쓰기 / 수명</th>
+          <td>해당 없음</td><td>해당 없음</td>
+          <td class="win"><span class="yes">쓰기 0</span> — 순수 읽기</td></tr>
+
+        <tr><th style="border-top:2px solid var(--line-2)">메모리 압박이 오면</th>
+          <td style="border-top:2px solid var(--line-2)">해당 없음</td>
+          <td style="border-top:2px solid var(--line-2)"><span class="nope">버틸 수 없다</span> — pinned 는 스왑조차 안 된다</td>
+          <td class="win" style="border-top:2px solid var(--line-2)"><span class="yes">clean page 라 그냥 버린다</span></td></tr>
+        <tr><th>모자랄 때의 모습</th>
+          <td>OOM</td><td>안 뜨거나 OOM — 중간이 없다</td>
+          <td class="win">캐시 히트율만큼 <b>완만하게</b></td></tr>
+        <tr><th>이 박스<br><span class="mono" style="font-size:.9em">64 GiB VRAM · 30 GiB RAM</span></th>
+          <td><span class="nope">✗</span> 테이블만 95 GiB(BF16)</td>
+          <td><span class="nope">✗</span> RAM 30 GiB &lt; 47.7 GiB</td>
+          <td class="win"><span class="yes">✓ 41.9 ~ 48.5 tok/s</span></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note">
+    <span class="tag">정직하게</span>
+    <p>SSD 페이징은 <b>공짜가 아니다.</b> 디코드를 최대 14% 내주고, 처음 보는 긴 프롬프트에서는
+    프리필이 2.5배 느려지며, 성능이 캐시 상태에 따라 흔들리고, 다른 프로세스가 디스크를 쓰면
+    같이 느려진다. 전부 VRAM 에 올릴 수 있다면 그게 언제나 낫다.</p>
+    <p>이 방식이 이기는 조건은 하나뿐이다 — <b>다른 방법으로는 아예 안 뜰 때.</b>
+    이 박스가 그렇다. 그리고 그때 <b>실패가 연속적</b>이라는 것이 결정적이다:
+    RAM 이 모자라면 히트율이 떨어져 조금 느려질 뿐, 뜨느냐 마느냐가 바뀌지 않는다.
+    FreeToken 의 47.7 GiB pinned 는 커널이 옮길 수도 내보낼 수도 없어서
+    "느리게라도 도는" 선택지가 아예 없다.</p>
+  </div>
+</section>
+
+<h2><span class="num">05</span> 더 자세히</h2>
+  <p>이 글은 개념과 원리만 다뤘다. 실제로 어떻게 쟀는지, 왜 그 숫자가 나오는지,
+  빌드·저장장치·경합·미스율을 각각 흔들면 무엇이 바뀌는지는 실험 보고서에 있다.</p>
+  <p style="margin-top:1.2rem">
+    <a href="https://claude.ai/code/artifact/aeaa4910-bef2-4267-8acd-37b3cd158c6d"
+       style="font-family:var(--f-disp);font-weight:700;font-size:1.05rem;color:var(--accent);text-decoration:none;border-bottom:2px solid var(--accent);padding-bottom:2px">
+      초당 3 메가바이트 →</a>
+    <span style="color:var(--ink-3);font-size:.9rem;margin-left:.6rem">실험 보고서 · 10절 · 표 35개 · 그림 3개</span>
+  </p>
+</section>
+
+<footer>
+  실측 <b>2026-09-01</b> · CMP 170HX(sm_80, 64 GiB HBM2e) · 호스트 RAM 30 GiB · Crucial P1 NVMe<br>
+  llama.cpp <b>a32af33</b> (b10717) · CUDA 13.3 · <b>AtomicChat AD-3.84bpw-IQ4_XS</b> · Q5_1 PLE 38.4 GB<br>
+  플래그 <b>-ngl 99 -c 32768 -fit off --jinja</b> — <span style="opacity:.7">-ot 없음, --lazy-mode 기본값</span>
+</footer>
+
+</div>

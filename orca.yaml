@@ -1,6 +1,0 @@
-worktree:
-  sharedDirectories:
-    - models
-    - llama_server_cuda
-    - llama_server_vulkan
-    - .caddy
