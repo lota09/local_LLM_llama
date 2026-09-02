@@ -40,26 +40,29 @@ conda install -c conda-forge cmake
 **원인**: 다운로드 함수가 resume 플래그를 지원하지 않음
 
 **해결책** (자동 적용됨):
-```bash
-# download_model.sh:
-# - curl: -C - (resume 자동 활성화)
-# - wget: -c (resume 자동 활성화)
-# - 최대 3회 자동 재시도
-# - 재시도 간 지수 백오프 (10초, 20초, 30초)
 
-# download_model.py:
-# - HTTP Range 헤더 사용
-# - 파일 크기 기반 자동 resume
-# - 최대 3회 자동 재시도
+구현은 `download_model.py` 한 곳뿐이다. `download_model.sh` 는 그걸 exec 하는
+얇은 진입점이라 어느 쪽으로 실행해도 동작이 같다.
+
+```
+- 이어받기는 wget -c / curl -C - 에게 맡긴다 (검증된 구현, HF 의 302 → CDN
+  리다이렉트 너머로도 206 Partial Content 로 정상 동작)
+- 최대 3회 자동 재시도, 재시도 간 백오프 (10초, 20초)
+- 실패해도 부분 파일을 지우지 않는다 (지우면 다음 실행에서 이어받을 수 없다)
+- 다시 실행하면 HF 가 알려준 파일 크기와 비교해서 스스로 정한다:
+    크기가 같으면      → 건너뛴다
+    작으면             → 이어받는다
+    크거나 알 수 없으면 → 그때만 물어본다
+- 받은 파일은 HF 의 sha256(lfs.oid)과 대조한다
 ```
 
 **사용 방법**:
 ```bash
-# 중단된 다운로드는 자동으로 재개됨
-bash download_model.sh
+# 중단된 다운로드는 다시 실행하면 받다 만 지점부터 재개된다
+bash download_model.sh        # == python3 download_model.py
 
-# Python 버전도 동일하게 작동
-python3 download_model.py
+REDOWNLOAD=1 bash download_model.sh   # 다 받은 파일도 새로 받기
+VERIFY_ALL=1 bash download_model.sh   # 건너뛴 파일도 sha256 검증
 ```
 
 ---
@@ -116,11 +119,8 @@ bash build_llama_server.sh
 
 ### 3단계: 모델 다운로드
 ```bash
-# Shell 버전
-bash download_model.sh
-
-# Python 버전
-python3 download_model.py
+bash download_model.sh        # download_model.py 를 exec 하는 얇은 진입점
+python3 download_model.py     # 직접 실행해도 동일
 ```
 
 ---
